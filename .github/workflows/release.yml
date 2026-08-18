@@ -1,0 +1,251 @@
+name: release
+
+# One binary per platform, one npm package per binary, and a root
+# package that carries no binary at all. That is what makes an install
+# a download of one file for the machine doing the installing, with no
+# compiler, no node-gyp and no script running on the user's machine.
+#
+# The matrix is the tier 1 rows of platforms.toml in tamnd/zu, plus
+# Windows on arm64, which is tier 2 there and cheap here because the
+# runner exists. Anything outside it is a source build, which is what
+# `npm i` falls back to failing at today and what the WASM build will
+# answer for later.
+#
+# It runs on the pull request that changes how a binary is built,
+# because the alternative is finding out on the tag, which is the one
+# moment a release cannot be rebuilt quietly.
+
+on:
+  # What the release conductor in tamnd/zu calls, with the version the
+  # whole train is releasing.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The version being released
+        required: false
+        default: 0.0.0
+        type: string
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - package.json
+      - npm/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # The Node the two Linux images do not carry. Pinned, like every other
+  # toolchain here, because a build whose tools float is a build nobody
+  # can reproduce on the day it breaks.
+  NODE_VERSION: v24.19.0
+
+jobs:
+  binary:
+    name: ${{ matrix.target }}
+    strategy:
+      # Eight platforms, and the interesting run is the one that says
+      # which of them broke rather than the first one to.
+      fail-fast: false
+      matrix:
+        include:
+          # The glibc rows build inside manylinux_2_28, which is the
+          # floor platforms.toml sets and which covers RHEL 8 and
+          # everything newer. A binary linked against the runner's own
+          # glibc is the failure that gets reported as "works on my
+          # machine": it loads where it was built and dies on the user's.
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            container: quay.io/pypa/manylinux_2_28_x86_64:2026.08.15-1
+            node: linux-x64
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            container: quay.io/pypa/manylinux_2_28_aarch64:2026.08.15-1
+            node: linux-arm64
+          # The musl rows build inside Alpine through docker rather than
+          # as a job container. GitHub runs the JavaScript half of an
+          # action inside the job's container and has no Alpine build of
+          # it for arm64, so a job container of Alpine is a checkout that
+          # fails on the arm runner and passes on the other.
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+            alpine: alpine:3.24.1
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            alpine: alpine:3.24.1
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+          # Cross compiled from the arm runner, which on macOS is one
+          # flag: the linker and the C compiler both take an -arch and
+          # Apple ships both halves in one toolchain.
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # The manylinux image carries a compiler for wheels and nothing
+      # for this, so the two things this build needs go in by hand. The
+      # tarball rather than a package, because the image is RHEL 8 and
+      # its Node is older than this package's floor.
+      - name: Node and rustup, inside the image
+        if: matrix.container != ''
+        run: |
+          set -eu
+          curl -fsSL "https://nodejs.org/dist/$NODE_VERSION/node-$NODE_VERSION-${{ matrix.node }}.tar.xz" \
+            | tar -xJ -C /usr/local --strip-components=1
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --no-modify-path --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/setup-node@v7
+        if: matrix.container == '' && matrix.alpine == ''
+        with:
+          node-version: 24
+
+      # rust-toolchain.toml names the version and its components, and
+      # the rustup every hosted image ships installs both on the first
+      # cargo command. Only the target has to be asked for, and only
+      # where it is not the machine's own.
+      - name: The target, where it is not this machine's
+        if: matrix.alpine == '' && matrix.target == 'x86_64-apple-darwin'
+        run: rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        if: matrix.alpine == ''
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        if: matrix.alpine == ''
+        shell: bash
+        run: |
+          set -eu
+          npm ci
+          npx napi build --platform --release --target ${{ matrix.target }}
+
+      # Alpine builds the row's own architecture natively, so there is
+      # no target flag: inside the image the default target is the musl
+      # one. The crt-static override is what makes a shared object
+      # possible at all on musl, whose default is to link the C runtime
+      # statically into everything.
+      #
+      # The linker is named per target rather than in RUSTFLAGS, because
+      # napi passes --target and cargo stops applying RUSTFLAGS to host
+      # artifacts as soon as it sees one. The host artifacts here are the
+      # build scripts of proc macro crates, which is exactly where the
+      # arm64 row was failing: Rust's aarch64 musl target asks for
+      # aarch64-linux-musl-gcc, which is what a cross toolchain calls its
+      # compiler and not what a machine compiling for itself has. On
+      # Alpine the compiler is gcc, for both rows.
+      - name: Build, inside Alpine
+        if: matrix.alpine != ''
+        run: |
+          docker run --rm -v "$PWD":/work -w /work \
+            -e RUSTFLAGS="-C target-feature=-crt-static" \
+            -e CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=gcc \
+            -e CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=gcc \
+            ${{ matrix.alpine }} sh -c '
+              set -eu
+              apk add --no-cache nodejs npm rustup build-base
+              rustup-init -y --no-modify-path --profile minimal
+              export PATH="$HOME/.cargo/bin:$PATH"
+              npm ci
+              npx napi build --platform --release
+            '
+
+      # One file, named after the platform it runs on, which is what the
+      # loader looks for and what the platform package publishes.
+      - name: The binary is the one this row was for
+        run: node tools/binary.mjs ${{ matrix.target }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: ./*.node
+          if-no-files-found: error
+
+  # The eight binaries laid into the eight packages, checked as a set.
+  # A missing one here is a platform that would have installed and then
+  # failed at the require, which is the failure this job exists to turn
+  # into a red build instead.
+  packages:
+    needs: binary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - run: npx napi artifacts --output-dir ./artifacts
+      # Which lays each binary into its package and writes the eight
+      # optional dependencies into the root manifest at the version being
+      # released. Nothing is published here: the tag decides that, and
+      # this job runs on pull requests too.
+      - run: npx napi pre-publish --no-gh-release --skip-optional-publish
+      - name: Every package holds the binary it names
+        run: node tools/packages.mjs
+      - name: An install of what would be published runs a statement
+        run: node tools/install.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: npm/
+          if-no-files-found: error
+
+  # Publishing is the one step that cannot be taken back, so it happens
+  # on a tag and nowhere else. The platform packages go first: the root
+  # package is what a user installs, and it is worthless until every
+  # optional dependency it names exists.
+  publish:
+    needs: packages
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: npm/
+      # Again, on this checkout, because the manifest a publish reads is
+      # the one in the working directory and the job before this one
+      # wrote its copy somewhere else.
+      - run: npx napi pre-publish --no-gh-release --skip-optional-publish
+      - run: node tools/packages.mjs
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -eu
+          for each in npm/*/; do
+            npm publish "$each" --access public --provenance
+          done
+          npm publish --access public --provenance
