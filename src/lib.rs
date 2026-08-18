@@ -19,6 +19,7 @@
 mod cancel;
 mod conn;
 mod error;
+mod stream;
 mod value;
 
 /// The version of the client.

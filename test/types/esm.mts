@@ -2,7 +2,16 @@
 // being asserted is that it compiles, which is the half of an API that
 // a test suite in JavaScript cannot reach.
 
-import { connect, isZuError, ZuDate, type ZuError, type ZuRows } from 'zudb'
+import {
+  connect,
+  isZuError,
+  ZuDate,
+  type ZuBatch,
+  type ZuError,
+  type ZuRows,
+  type ZuStream,
+  type ZuSummary,
+} from 'zudb'
 
 export async function people(path: string, name: string): Promise<string[]> {
   // `await using` is the intended scoping, and it needs the connection
@@ -23,6 +32,47 @@ export async function people(path: string, name: string): Promise<string[]> {
   // An INT64 is a bigint, which is the one rule worth learning first: a
   // `number` here would not compile, and that is the whole point of it.
   return rows.map((row) => `${row.name} ${row.id.toString()}`)
+}
+
+type Person = { id: bigint; name: string }
+
+export async function names(path: string): Promise<number> {
+  await using conn = await connect(path, { readOnly: true })
+
+  // The row type is the stream's, so what comes out of the loop is
+  // typed without a cast anywhere, and so is what comes out of a batch.
+  await using stream: ZuStream<Person> = conn.stream<Person>(
+    'MATCH (p:person) RETURN p.id AS id, p.name AS name',
+    null,
+    { batchRows: 512, signal: AbortSignal.timeout(50) },
+  )
+
+  let longest = 0
+  for await (const row of stream) longest = Math.max(longest, row.name.length)
+
+  // Both of these are null until there is something to read in them,
+  // which is what makes a caller check rather than believe.
+  const summary: ZuSummary | null = stream.summary
+  if (summary && !summary.streamed) longest += 0
+
+  return longest
+}
+
+export async function counted(path: string): Promise<number> {
+  const conn = await connect(path)
+  const stream = conn.stream<Person>('MATCH (p:person) RETURN p.id AS id, p.name AS name')
+  let rows = 0
+  for await (const batch of stream.batches()) {
+    const typed: ZuBatch<Person> = batch
+    rows += typed.length
+  }
+  // A Web Stream of the same rows, for anything that already speaks one.
+  const web: ReadableStream<Person> = conn
+    .stream<Person>('MATCH (p:person) RETURN p.id AS id')
+    .toReadableStream()
+  await web.cancel()
+  await conn.close()
+  return rows
 }
 
 export function retryable(caught: unknown): boolean {

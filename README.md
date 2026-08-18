@@ -35,7 +35,7 @@ The rows are an array, so iterating them is `for (const row of rows)` and nothin
 
 ## What works today
 
-`connect`, `query`, `exec`, `close`, `dispose` and `await using`. Named parameters both ways, including lists, records and nesting. Every scalar the engine has, plus nodes, edges and paths with their tables named rather than numbered, and `ZuDate`, `ZuTime`, `ZuTimestamp` and `ZuDuration`. Read-only connections, memory and thread limits. An `AbortSignal` on any statement. The full error surface above, and `isZuError` to recognize it. Both module formats, typed separately.
+`connect`, `query`, `exec`, `stream`, `close`, `dispose` and `await using`. Named parameters both ways, including lists, records and nesting. Every scalar the engine has, plus nodes, edges and paths with their tables named rather than numbered, and `ZuDate`, `ZuTime`, `ZuTimestamp` and `ZuDuration`. Read-only connections, memory and thread limits. An `AbortSignal` on any statement. The full error surface above, and `isZuError` to recognize it. Streaming, as an async iterable, as batches and as a Web Stream. Both module formats, typed separately.
 
 Build it with `npm run build`, and run the suite with `npm test`. Nothing is published yet, so `npm i zudb` is not a thing you can type at anybody's terminal, but everything it will do is built and installed on every run of the release workflow.
 
@@ -50,6 +50,29 @@ const rows = await conn.query(statement, params, { signal: AbortSignal.timeout(5
 It is the signal JavaScript already has, so a timeout written like the one above, the signal a framework hands a request handler, and an `AbortSignal.any([...])` composed out of both all work here without anything being adapted. When it fires, the engine's interrupt is raised, the executor notices it at a boundary it was already stopping at, and the statement ends inside a vector of rows rather than at the end of the scan. The connection is left exactly as it was, so the statement after a stopped one runs normally.
 
 What the promise rejects with is the signal's own reason, which is what `fetch` does: `AbortSignal.timeout(50)` rejects with the runtime's `TimeoutError`, `controller.abort(new RequestGone())` rejects with the `RequestGone` you made, and a bare `controller.abort()` rejects with the runtime's `AbortError`. A signal that has already fired stops the statement before the engine sees it at all. A signal that never fires costs one listener, taken off again when the statement ends, whether it answered, failed or was stopped.
+
+## Reading a result a piece at a time
+
+`conn.stream(...)` runs the same statement and hands the rows over as they are made, instead of building the whole answer first:
+
+```ts
+await using stream = conn.stream<{ id: bigint; name: string }>(
+  `MATCH (p:Person) RETURN p.id AS id, p.name AS name`,
+);
+for await (const { id, name } of stream) {
+  if (name === "ada") break; // the scan under it stops here
+}
+
+stream.summary; // { columns, rows, stopped, streamed, notices }
+```
+
+Three ways to read it, all the same statement read once. `for await` over the stream gives one row at a time. `stream.batches()` gives the array the rows crossed the boundary in, with `columns` beside it, which is what to reach for when the work is per batch rather than per row. `stream.toReadableStream()` gives a `ReadableStream<Row>` for anything that already speaks Web Streams, and its backpressure is the reader's: nothing is pulled from the database until what is in front of it has drained.
+
+Ending early is the case worth knowing about, because it is the reason streaming is different from `query`. A `break`, a `throw`, a `return()` on the iterator, a `cancel()`, or leaving the block of an `await using` all stop the statement and wait for it to let go of the connection, so the next statement on that connection runs rather than queueing behind a scan nobody is reading. The rows already read stand, and `summary.stopped` says the reader stopped it. The statement itself does not start until the first read, so a stream made and never read is not a scan holding anything.
+
+Between the statement and the loop sit two batches, which is the whole of the buffering: a reader slower than the scan stops the scan rather than filling memory behind it. `{ batchRows: 512 }` sets what a batch may hold, which is what to name when the rows are going somewhere with a size of its own. On 50k rows here a stream costs about 460ns a row against 370ns for `query`, reading a batch at a time costs about 320ns, and reading the first batch and stopping costs 1.1ms against 18.6ms for the whole scan, which is what the whole thing is for.
+
+A statement that has to see every row before it can give one, which is `ORDER BY`, `DISTINCT` and the aggregates, runs whole and is handed over in batches afterwards. The loop is the same either way and `summary.streamed` is what tells them apart.
 
 ## Importing it, either way
 
@@ -83,7 +106,7 @@ Anything outside that table has no binary and no source build to fall back on, s
 
 ## Still to come
 
-`AsyncIterable` and Web Streams over a result. `bigIntMode`. `toTemporal()` and `{ temporal: true }`, for the runtimes where Temporal is unflagged: it reached Stage 4 in March 2026 and is unflagged in Node 26, but Node 24 is still the active LTS and Safari is still behind a flag, which is why the stable types are the four classes above. Bun and Deno in CI, and the WASM build for the browser.
+`bigIntMode`. `toTemporal()` and `{ temporal: true }`, for the runtimes where Temporal is unflagged: it reached Stage 4 in March 2026 and is unflagged in Node 26, but Node 24 is still the active LTS and Safari is still behind a flag, which is why the stable types are the four classes above. Bun and Deno in CI, and the WASM build for the browser.
 
 ## Runtimes
 

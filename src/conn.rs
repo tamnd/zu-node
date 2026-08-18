@@ -23,10 +23,11 @@ use napi::bindgen_prelude::*;
 use napi::{Env, ScopedTask, ValueType};
 use napi_derive::napi;
 use zudb::query::{QueryResult, Value};
-use zudb::{Config, Database, Interrupt, ZuError};
+use zudb::{Config, Database, DiagnosticRecord, Interrupt, ZuError};
 
 use crate::cancel::Watch;
 use crate::error::{aborted, raise, usage};
+use crate::stream::{self, Started, ZuCursor};
 use crate::value::{Names, from_js, to_js};
 
 /// What a connection can be opened with.
@@ -242,6 +243,56 @@ impl Connection {
         AsyncTask::new(ExecTask(self.task(env, statement, params, options)))
     }
 
+    /// Runs one statement and gives back a cursor over its rows.
+    ///
+    /// The pull underneath `stream`, which is what a program uses. The
+    /// statement does not start here: it starts on the first read, so
+    /// that a cursor made and not read is not a scan holding the
+    /// connection against every statement after it.
+    #[napi(
+        ts_args_type = "statement: string, params?: Record<string, ZuParam> | null, options?: ZuStreamOptions | null",
+        ts_return_type = "ZuCursor"
+    )]
+    pub fn cursor(
+        &self,
+        env: &Env,
+        statement: String,
+        params: Option<Object<'_>>,
+        options: Option<Object<'_>>,
+    ) -> ZuCursor {
+        // Read here rather than on the statement's thread, because
+        // reading a JavaScript value is something only the thread that
+        // owns the runtime may do. So is adding the listener the signal
+        // is watched through.
+        let bound = if self.alive.load(Ordering::Acquire) {
+            batch_rows(options.as_ref()).and_then(|batch_rows| {
+                Ok((
+                    bind(env, params)?,
+                    batch_rows,
+                    watch(env, options, self.interrupt.clone())?,
+                ))
+            })
+        } else {
+            Err(CLOSED.to_string())
+        };
+        let (params, batch_rows, watch, refused) = match bound {
+            Ok((params, batch_rows, watch)) => (params, batch_rows, watch, None),
+            Err(message) => (Vec::new(), None, None, Some(message)),
+        };
+        stream::open(
+            Started {
+                inner: Arc::clone(&self.inner),
+                alive: Arc::clone(&self.alive),
+                statement,
+                params,
+                batch_rows,
+                guard: watch.as_ref().map(Watch::guard),
+            },
+            watch,
+            refused,
+        )
+    }
+
     /// The task one statement runs as, whether or not it is going to
     /// work.
     ///
@@ -329,6 +380,23 @@ pub enum Failure {
     Aborted,
 }
 
+/// The exception a failed statement rejects the caller's promise with.
+///
+/// An abort rejects with the signal's own reason, which is what `fetch`
+/// does: a caller who wrote `AbortSignal.timeout(50)` gets back the
+/// `TimeoutError` that signal carries, and one who wrote
+/// `controller.abort(new MyError())` gets their own object rather than
+/// a description of it.
+pub(crate) fn failed(env: &Env, failure: Failure, watch: Option<&Watch>) -> Error {
+    match failure {
+        Failure::Engine(err) => raise(env, err),
+        Failure::Usage(message) => usage(env, message),
+        Failure::Aborted => watch
+            .and_then(|watch| watch.reason(env))
+            .map_or_else(|| aborted(env, ABORTED), Error::from),
+    }
+}
+
 impl From<ZuError> for Failure {
     fn from(err: ZuError) -> Self {
         Failure::Engine(err)
@@ -336,7 +404,8 @@ impl From<ZuError> for Failure {
 }
 
 /// What a closed connection says, wherever it is noticed.
-const CLOSED: &str = "the connection is closed, so there is nothing left to run a statement on";
+pub(crate) const CLOSED: &str =
+    "the connection is closed, so there is nothing left to run a statement on";
 
 /// What an abort says when the signal that fired named no reason of its
 /// own, which is a signal built by hand rather than by a runtime.
@@ -349,7 +418,7 @@ const ABORTED: &str = "the statement was stopped by the signal it was given";
 /// `signal` that is not an `AbortSignal` is refused here rather than
 /// where the listener fails to be added, because the caller's mistake is
 /// the value they passed.
-fn watch(
+pub(crate) fn watch(
     env: &Env,
     options: Option<Object<'_>>,
     interrupt: Interrupt,
@@ -380,13 +449,52 @@ fn watch(
     }
 }
 
+/// Reads `options.batchRows`, which is how many rows a caller wants in
+/// a batch.
+///
+/// Absent means the engine's own vector, which is the unit it already
+/// works in and the one that costs nothing to hand over. A caller names
+/// a size when the rows are going somewhere with a size of its own, an
+/// HTTP chunk or a write of a fixed length, and a size of zero is a
+/// stream that could never hand anything over rather than a default.
+fn batch_rows(options: Option<&Object<'_>>) -> std::result::Result<Option<u32>, String> {
+    let Some(options) = options else {
+        return Ok(None);
+    };
+    let rows: Option<f64> = options
+        .get_named_property::<Unknown<'_>>("batchRows")
+        .map_err(|err| err.reason)
+        .and_then(|rows| match rows.get_type().map_err(|err| err.reason)? {
+            ValueType::Undefined | ValueType::Null => Ok(None),
+            ValueType::Number => rows
+                .coerce_to_number()
+                .and_then(|rows| rows.get_double())
+                .map(Some)
+                .map_err(|_| "batchRows is a number that cannot be read".to_string()),
+            other => Err(format!("batchRows is a {other}, which is not a number")),
+        })?;
+    // Read as a double and checked here rather than converted, because
+    // JavaScript's own narrowing to an unsigned integer turns -1 into
+    // four billion and 1.5 into 1, and a batch size nobody asked for is
+    // worse than a call that says no.
+    match rows {
+        None => Ok(None),
+        Some(rows) if rows.fract() == 0.0 && (1.0..=f64::from(u32::MAX)).contains(&rows) => {
+            Ok(Some(rows as u32))
+        }
+        Some(rows) => Err(format!(
+            "batchRows is {rows}, and a batch holds a whole number of rows, one at the least"
+        )),
+    }
+}
+
 /// Reads the parameter object into the values the engine binds.
 ///
 /// Every failure comes back as the message to refuse the call with,
 /// including a boundary failure, because a caller who cannot be given
 /// the value they passed is being told the same thing either way and
 /// would rather hear it as a rejection than as a throw.
-fn bind(
+pub(crate) fn bind(
     env: &Env,
     params: Option<Object<'_>>,
 ) -> std::result::Result<Vec<(String, Value)>, String> {
@@ -473,22 +581,8 @@ impl QueryTask {
     }
 
     /// The exception this rejects the caller's promise with.
-    ///
-    /// An abort rejects with the signal's own reason, which is what
-    /// `fetch` does: a caller who wrote `AbortSignal.timeout(50)` gets
-    /// back the `TimeoutError` that signal carries, and one who wrote
-    /// `controller.abort(new MyError())` gets their own object rather
-    /// than a description of it.
     fn failed(&self, env: &Env, failure: Failure) -> Error {
-        match failure {
-            Failure::Engine(err) => raise(env, err),
-            Failure::Usage(message) => usage(env, message),
-            Failure::Aborted => self
-                .watch
-                .as_ref()
-                .and_then(|watch| watch.reason(env))
-                .map_or_else(|| aborted(env, ABORTED), Error::from),
-        }
+        failed(env, failure, self.watch.as_ref())
     }
 
     /// Takes the listener back off the signal, whatever happened.
@@ -538,15 +632,7 @@ fn rows<'env>(env: &'env Env, result: &QueryResult, names: &Names) -> Result<Arr
         }
         array.set(ix as u32, object)?;
     }
-    let mut raised = env.create_array(result.notices.len() as u32)?;
-    for (ix, notice) in result.notices.iter().enumerate() {
-        let mut record = Object::new(env)?;
-        record.set("code", notice.status.code())?;
-        record.set("condition", notice.status.standard_text())?;
-        record.set("message", notice.detail.as_str())?;
-        record.set("docUrl", notice.doc_url())?;
-        raised.set(ix as u32, record)?;
-    }
+    let raised = notices(env, &result.notices)?;
     // The same value seen as an object, which is what an array is. The
     // three properties go on there rather than at an index, so the
     // array still has exactly as many elements as the statement had
@@ -564,12 +650,30 @@ fn rows<'env>(env: &'env Env, result: &QueryResult, names: &Names) -> Result<Arr
     Ok(array)
 }
 
+/// What the engine wanted to say about a statement that ran anyway.
+///
+/// The same four fields wherever they are read from, because a notice
+/// off a stream and a notice off a result are the same thing and a
+/// caller logging them should not have to know which they have.
+pub(crate) fn notices<'env>(env: &'env Env, raised: &[DiagnosticRecord]) -> Result<Array<'env>> {
+    let mut array = env.create_array(raised.len() as u32)?;
+    for (ix, notice) in raised.iter().enumerate() {
+        let mut record = Object::new(env)?;
+        record.set("code", notice.status.code())?;
+        record.set("condition", notice.status.standard_text())?;
+        record.set("message", notice.detail.as_str())?;
+        record.set("docUrl", notice.doc_url())?;
+        array.set(ix as u32, record)?;
+    }
+    Ok(array)
+}
+
 /// One property that rides beside the rows rather than among them.
 ///
 /// Readable and replaceable like any other, but not enumerable, which
 /// is the whole difference between a result that is an array and one
 /// that merely looks like one.
-fn beside<T: ToNapiValue>(env: &Env, name: &str, value: T) -> Result<Property> {
+pub(crate) fn beside<T: ToNapiValue>(env: &Env, name: &str, value: T) -> Result<Property> {
     Ok(Property::new()
         .with_utf8_name(name)?
         .with_napi_value(env, value)?
