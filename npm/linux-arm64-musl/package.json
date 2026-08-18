@@ -1,0 +1,34 @@
+{
+  "name": "zudb-linux-arm64-musl",
+  "version": "0.0.1",
+  "cpu": [
+    "arm64"
+  ],
+  "main": "zudb.linux-arm64-musl.node",
+  "files": [
+    "zudb.linux-arm64-musl.node"
+  ],
+  "description": "The JavaScript client for zu, an embedded property-graph database",
+  "keywords": [
+    "graph",
+    "database",
+    "embedded",
+    "gql",
+    "cypher"
+  ],
+  "homepage": "https://zu.dev",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">= 24"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tamnd/zu-node.git"
+  },
+  "os": [
+    "linux"
+  ],
+  "libc": [
+    "musl"
+  ]
+}

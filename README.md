@@ -37,13 +37,30 @@ The rows are an array, so iterating them is `for (const row of rows)` and nothin
 
 `connect`, `query`, `exec`, `close`, `dispose` and `await using`. Named parameters both ways, including lists, records and nesting. Every scalar the engine has, plus nodes, edges and paths with their tables named rather than numbered, and `ZuDate`, `ZuTime`, `ZuTimestamp` and `ZuDuration`. Read-only connections, memory and thread limits. The full error surface above.
 
-Build it with `npm run build`, and run the suite with `npm test`. There are no published binaries yet, so `npm i zudb` is not a thing you can type at anybody's terminal.
+Build it with `npm run build`, and run the suite with `npm test`. Nothing is published yet, so `npm i zudb` is not a thing you can type at anybody's terminal, but everything it will do is built and installed on every run of the release workflow.
+
+## Installing, once there is something to install
+
+`npm i zudb`, and that is the whole of it. The install downloads one file, runs nothing, and needs no compiler: the root package carries the loader and no binary, each platform has its own package holding exactly one addon, and npm picks the one for the machine out of `optionalDependencies` by its `os`, `cpu` and `libc`. There is no `postinstall`, no `node-gyp`, no `node-pre-gyp` and no fetch from anywhere but the registry, which is what makes the package installable behind a proxy, inside a locked-down CI image, and on a machine with no toolchain on it.
+
+| Machine | Package | Built on |
+|---|---|---|
+| Linux x64, glibc | `zudb-linux-x64-gnu` | manylinux_2_28, so glibc 2.28 and newer, which is RHEL 8 and newer |
+| Linux arm64, glibc | `zudb-linux-arm64-gnu` | the same image, the same floor |
+| Linux x64, musl | `zudb-linux-x64-musl` | Alpine 3.24 |
+| Linux arm64, musl | `zudb-linux-arm64-musl` | Alpine 3.24 |
+| macOS arm64 | `zudb-darwin-arm64` | the hosted arm64 runner |
+| macOS x64 | `zudb-darwin-x64` | cross compiled from that same runner |
+| Windows x64 | `zudb-win32-x64-msvc` | the hosted x64 runner |
+| Windows arm64 | `zudb-win32-arm64-msvc` | the hosted arm64 runner |
+
+Anything outside that table has no binary and no source build to fall back on, so the install resolves nothing and the first `require` says so. The browser and the platforms nobody builds for are what the WASM target answers, later.
 
 `npm run bench` measures what this package adds to the engine, which is a row object and one JavaScript value per column: the same scan with the rows dropped is the floor, and the difference between the two is what the boundary costs. Run it against a release build, since a debug build of the engine moves the floor by an order of magnitude and not the rest of it.
 
 ## Still to come
 
-Prebuilt binaries under `optionalDependencies`, with no postinstall script and no `node-gyp`. `AsyncIterable` and Web Streams over a result, and `AbortSignal` wired to the engine's interrupt. `bigIntMode`. `toTemporal()` and `{ temporal: true }`, for the runtimes where Temporal is unflagged: it reached Stage 4 in March 2026 and is unflagged in Node 26, but Node 24 is still the active LTS and Safari is still behind a flag, which is why the stable types are the four classes above. Dual ESM and CJS, with types first in every export condition. Bun and Deno in CI, and the WASM build for the browser.
+`AsyncIterable` and Web Streams over a result, and `AbortSignal` wired to the engine's interrupt. `bigIntMode`. `toTemporal()` and `{ temporal: true }`, for the runtimes where Temporal is unflagged: it reached Stage 4 in March 2026 and is unflagged in Node 26, but Node 24 is still the active LTS and Safari is still behind a flag, which is why the stable types are the four classes above. Dual ESM and CJS, with types first in every export condition. Bun and Deno in CI, and the WASM build for the browser.
 
 ## Runtimes
 

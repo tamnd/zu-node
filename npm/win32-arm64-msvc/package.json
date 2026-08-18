@@ -1,0 +1,31 @@
+{
+  "name": "zudb-win32-arm64-msvc",
+  "version": "0.0.1",
+  "cpu": [
+    "arm64"
+  ],
+  "main": "zudb.win32-arm64-msvc.node",
+  "files": [
+    "zudb.win32-arm64-msvc.node"
+  ],
+  "description": "The JavaScript client for zu, an embedded property-graph database",
+  "keywords": [
+    "graph",
+    "database",
+    "embedded",
+    "gql",
+    "cypher"
+  ],
+  "homepage": "https://zu.dev",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">= 24"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tamnd/zu-node.git"
+  },
+  "os": [
+    "win32"
+  ]
+}
