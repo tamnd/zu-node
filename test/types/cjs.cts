@@ -2,7 +2,7 @@
 // resolution through a different condition to a different file, and so
 // is worth compiling separately rather than assuming.
 
-import { connect, isZuError, type ZuParam, type ZuStream } from 'zudb'
+import { connect, isZuError, ZuTimestamp, type ZuParam, type ZuStream } from 'zudb'
 
 export async function total(path: string): Promise<number> {
   // The mode is on the statement here, so the rows it gives back are
@@ -26,6 +26,19 @@ export async function insert(path: string, values: Record<string, ZuParam>): Pro
   } catch (caught) {
     if (isZuError(caught) && caught.code === '42001') return
     throw caught
+  } finally {
+    conn.close()
+  }
+}
+
+export async function moment(path: string, at: bigint): Promise<unknown> {
+  // A `Temporal` value binds as a parameter on a connection that never
+  // asked for temporal mode, so this one is opened without the option
+  // and the value it binds is made from a class instead.
+  const conn = await connect(path)
+  try {
+    await conn.exec('INSERT (e:event {id: 1, at: $at})', { at: new ZuTimestamp(at) })
+    return new ZuTimestamp(at, 120).toTemporal()
   } finally {
     conn.close()
   }

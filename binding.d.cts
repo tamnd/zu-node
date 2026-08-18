@@ -2,6 +2,70 @@
 /* eslint-disable */
 
 /**
+ * `Temporal.PlainDate`, on a program that has it.
+ *
+ * Asked of `globalThis` rather than imported, because `Temporal`
+ * reached Stage 4 in March 2026 and which `lib` declares it is
+ * different in every version of TypeScript that has shipped since. A
+ * program compiling against a `lib` that has `Temporal` gets the real
+ * type here and is checked against it. One compiling against a `lib`
+ * that does not gets `unknown`, which needs a cast at the call site and
+ * is the truth: this client cannot promise a type the compiler has
+ * never heard of, and it should not fail to compile for saying so.
+ */
+export type ZuPlainDate = typeof globalThis extends {
+  Temporal: { PlainDate: new (...args: any[]) => infer Value }
+}
+  ? Value
+  : unknown
+
+/** `Temporal.PlainTime`, on the terms [[ZuPlainDate]] gives. */
+export type ZuPlainTime = typeof globalThis extends {
+  Temporal: { PlainTime: new (...args: any[]) => infer Value }
+}
+  ? Value
+  : unknown
+
+/** `Temporal.PlainDateTime`, on the terms [[ZuPlainDate]] gives. */
+export type ZuPlainDateTime = typeof globalThis extends {
+  Temporal: { PlainDateTime: new (...args: any[]) => infer Value }
+}
+  ? Value
+  : unknown
+
+/** `Temporal.ZonedDateTime`, on the terms [[ZuPlainDate]] gives. */
+export type ZuZonedDateTime = typeof globalThis extends {
+  Temporal: { ZonedDateTime: new (...args: any[]) => infer Value }
+}
+  ? Value
+  : unknown
+
+/** `Temporal.Duration`, on the terms [[ZuPlainDate]] gives. Named for
+ * the standard's class rather than for this client's `ZuDuration`,
+ * which is the other one. */
+export type ZuTemporalDuration = typeof globalThis extends {
+  Temporal: { Duration: new (...args: any[]) => infer Value }
+}
+  ? Value
+  : unknown
+
+/**
+ * Every `Temporal` value this client understands, and nothing at all on
+ * a program whose `lib` has no `Temporal`.
+ *
+ * Nothing rather than `unknown` there, because this one is a member of
+ * a union: `unknown` in a union swallows it and would turn every row
+ * and every parameter into `unknown` for everybody. `never` in a union
+ * vanishes, so a program without `Temporal` types sees exactly what it
+ * saw before this existed.
+ */
+export type ZuTemporalValue = typeof globalThis extends {
+  Temporal: { Instant: new (...args: any[]) => infer Instant }
+}
+  ? Instant | ZuPlainDate | ZuPlainTime | ZuPlainDateTime | ZuZonedDateTime | ZuTemporalDuration
+  : never
+
+/**
  * A value a statement can hold, going out.
  *
  * INT64 is `bigint` and FLOAT is `number`, which is the one rule worth
@@ -10,6 +74,11 @@
  * as a number would be a count you cannot trust. `bigIntMode` changes
  * that for a statement or for a connection, with the hazard it
  * documents.
+ *
+ * A date, a time, a timestamp and a duration are the four classes by
+ * default and `Temporal` values on a connection opened with
+ * `{ temporal: true }`. A time with an offset is the exception in both
+ * directions: `Temporal` has no type for one, so it stays a `ZuTime`.
  */
 export type ZuValue =
   | null
@@ -24,6 +93,7 @@ export type ZuValue =
   | ZuTime
   | ZuTimestamp
   | ZuDuration
+  | ZuTemporalValue
   | ZuValue[]
   | { [field: string]: ZuValue }
 
@@ -32,7 +102,11 @@ export type ZuValue =
  *
  * Wider than what comes out, because a `number` that is whole binds as
  * INT64 and `undefined` binds as null, which is what makes an optional
- * field of a plain object pass straight through.
+ * field of a plain object pass straight through. A `Temporal` value
+ * binds as the zu value it is on every connection, whether or not the
+ * connection asked for `Temporal` on the way out, because recognizing
+ * one costs a property read and refusing one would be a rule nobody
+ * could guess.
  */
 export type ZuParam =
   | null
@@ -45,6 +119,7 @@ export type ZuParam =
   | ZuTime
   | ZuTimestamp
   | ZuDuration
+  | ZuTemporalValue
   | ZuParam[]
   | { [field: string]: ZuParam }
 
@@ -358,6 +433,19 @@ export declare class ZuDate {
   days: number
   constructor(days: number)
   /**
+   * The same day as a `Temporal.PlainDate`.
+   *
+   * For the program that wants one value converted rather than all of
+   * them, which is the common one: a result is read for its ids and
+   * its names and then formats the one date it is going to show. A
+   * connection opened with `{ temporal: true }` does this to every
+   * temporal value it gives back and this method is what it calls.
+   *
+   * Throws on a runtime that has no `Temporal`, naming the flag that
+   * turns it on.
+   */
+  toTemporal(): ZuPlainDate
+  /**
    * The same thing as a plain object, for the reason [`ZuNode::to_json`]
    * gives.
    */
@@ -384,6 +472,15 @@ export declare class ZuDuration {
   get months(): bigint
   /** The nanoseconds, which is zero for a year-month duration. */
   get nanos(): bigint
+  /**
+   * The same length as a `Temporal.Duration`.
+   *
+   * A year-month one becomes months and a day-time one becomes
+   * seconds and nanoseconds, which are the fields that hold what zu
+   * stores without inventing the rest: `Temporal.Duration` can carry
+   * months and days at once and no zu duration ever does.
+   */
+  toTemporal(): ZuTemporalDuration
   /**
    * The same thing as a plain object, for the reason [`ZuNode::to_json`]
    * gives.
@@ -457,6 +554,14 @@ export declare class ZuTime {
   constructor(nanos: bigint, offset?: number | undefined | null)
   get nanos(): bigint
   /**
+   * The same time as a `Temporal.PlainTime`.
+   *
+   * A local time only. A time with an offset has no `Temporal` type
+   * at all, so one throws here rather than losing the offset, and the
+   * message says why.
+   */
+  toTemporal(): ZuPlainTime
+  /**
    * The same thing as a plain object, for the reason [`ZuNode::to_json`]
    * gives.
    */
@@ -476,6 +581,16 @@ export declare class ZuTimestamp {
   offset?: number
   constructor(nanos: bigint, offset?: number | undefined | null)
   get nanos(): bigint
+  /**
+   * The same instant as a `Temporal.PlainDateTime` for a local one
+   * and a `Temporal.ZonedDateTime` for a zoned one.
+   *
+   * The zone of a zoned one is the offset it was written at, spelled
+   * `+02:00`, because that is what the engine stores. A named zone is
+   * a rule that changes under a stored value when the zone database
+   * is updated, so no value here has ever had one.
+   */
+  toTemporal(): ZuPlainDateTime | ZuZonedDateTime
   /**
    * The same thing as a plain object, for the reason [`ZuNode::to_json`]
    * gives.
@@ -527,6 +642,27 @@ export interface ConnectOptions {
    * say otherwise again for itself.
    */
   bigIntMode?: ZuBigIntMode
+  /**
+   * Gives back `Temporal` values rather than this client's four
+   * temporal classes, for every statement on this connection.
+   *
+   * Refused here, when the runtime has no `Temporal`, rather than at
+   * the first row that happens to hold a date: a program that asked
+   * for this and was quietly given something else would find out on
+   * the one code path its tests did not cover. Node 26 and the
+   * current browsers have `Temporal`, Node 24 has it behind
+   * `--harmony-temporal`, and a program that cannot be sure of its
+   * runtime uses `toTemporal()` on the value it wants instead.
+   *
+   * On the connection and not on a statement, because both spellings
+   * are exact and a program picks the one it wants to read for as
+   * long as it lives, where `bigIntMode` is a trade a single query
+   * makes.
+   *
+   * A time with an offset keeps its class either way, because
+   * `Temporal` has no type for one.
+   */
+  temporal?: boolean
 }
 
 /** The version of the client. */

@@ -2,6 +2,70 @@
 /* eslint-disable */
 
 /**
+ * `Temporal.PlainDate`, on a program that has it.
+ *
+ * Asked of `globalThis` rather than imported, because `Temporal`
+ * reached Stage 4 in March 2026 and which `lib` declares it is
+ * different in every version of TypeScript that has shipped since. A
+ * program compiling against a `lib` that has `Temporal` gets the real
+ * type here and is checked against it. One compiling against a `lib`
+ * that does not gets `unknown`, which needs a cast at the call site and
+ * is the truth: this client cannot promise a type the compiler has
+ * never heard of, and it should not fail to compile for saying so.
+ */
+export type ZuPlainDate = typeof globalThis extends {
+  Temporal: { PlainDate: new (...args: any[]) => infer Value }
+}
+  ? Value
+  : unknown
+
+/** `Temporal.PlainTime`, on the terms [[ZuPlainDate]] gives. */
+export type ZuPlainTime = typeof globalThis extends {
+  Temporal: { PlainTime: new (...args: any[]) => infer Value }
+}
+  ? Value
+  : unknown
+
+/** `Temporal.PlainDateTime`, on the terms [[ZuPlainDate]] gives. */
+export type ZuPlainDateTime = typeof globalThis extends {
+  Temporal: { PlainDateTime: new (...args: any[]) => infer Value }
+}
+  ? Value
+  : unknown
+
+/** `Temporal.ZonedDateTime`, on the terms [[ZuPlainDate]] gives. */
+export type ZuZonedDateTime = typeof globalThis extends {
+  Temporal: { ZonedDateTime: new (...args: any[]) => infer Value }
+}
+  ? Value
+  : unknown
+
+/** `Temporal.Duration`, on the terms [[ZuPlainDate]] gives. Named for
+ * the standard's class rather than for this client's `ZuDuration`,
+ * which is the other one. */
+export type ZuTemporalDuration = typeof globalThis extends {
+  Temporal: { Duration: new (...args: any[]) => infer Value }
+}
+  ? Value
+  : unknown
+
+/**
+ * Every `Temporal` value this client understands, and nothing at all on
+ * a program whose `lib` has no `Temporal`.
+ *
+ * Nothing rather than `unknown` there, because this one is a member of
+ * a union: `unknown` in a union swallows it and would turn every row
+ * and every parameter into `unknown` for everybody. `never` in a union
+ * vanishes, so a program without `Temporal` types sees exactly what it
+ * saw before this existed.
+ */
+export type ZuTemporalValue = typeof globalThis extends {
+  Temporal: { Instant: new (...args: any[]) => infer Instant }
+}
+  ? Instant | ZuPlainDate | ZuPlainTime | ZuPlainDateTime | ZuZonedDateTime | ZuTemporalDuration
+  : never
+
+/**
  * A value a statement can hold, going out.
  *
  * INT64 is `bigint` and FLOAT is `number`, which is the one rule worth
@@ -10,6 +74,11 @@
  * as a number would be a count you cannot trust. `bigIntMode` changes
  * that for a statement or for a connection, with the hazard it
  * documents.
+ *
+ * A date, a time, a timestamp and a duration are the four classes by
+ * default and `Temporal` values on a connection opened with
+ * `{ temporal: true }`. A time with an offset is the exception in both
+ * directions: `Temporal` has no type for one, so it stays a `ZuTime`.
  */
 export type ZuValue =
   | null
@@ -24,6 +93,7 @@ export type ZuValue =
   | ZuTime
   | ZuTimestamp
   | ZuDuration
+  | ZuTemporalValue
   | ZuValue[]
   | { [field: string]: ZuValue }
 
@@ -32,7 +102,11 @@ export type ZuValue =
  *
  * Wider than what comes out, because a `number` that is whole binds as
  * INT64 and `undefined` binds as null, which is what makes an optional
- * field of a plain object pass straight through.
+ * field of a plain object pass straight through. A `Temporal` value
+ * binds as the zu value it is on every connection, whether or not the
+ * connection asked for `Temporal` on the way out, because recognizing
+ * one costs a property read and refusing one would be a rule nobody
+ * could guess.
  */
 export type ZuParam =
   | null
@@ -45,6 +119,7 @@ export type ZuParam =
   | ZuTime
   | ZuTimestamp
   | ZuDuration
+  | ZuTemporalValue
   | ZuParam[]
   | { [field: string]: ZuParam }
 

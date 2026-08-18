@@ -28,7 +28,8 @@ use zudb::{Config, Database, DiagnosticRecord, Interrupt, ZuError};
 use crate::cancel::Watch;
 use crate::error::{aborted, raise, usage};
 use crate::stream::{self, Started, ZuCursor};
-use crate::value::{Ints, Shape, from_js, to_js};
+use crate::temporal;
+use crate::value::{Ints, Shape, Spelling, from_js, to_js};
 
 /// What a connection can be opened with.
 ///
@@ -50,6 +51,25 @@ pub struct ConnectOptions {
     /// say otherwise again for itself.
     #[napi(ts_type = "ZuBigIntMode")]
     pub big_int_mode: Option<String>,
+    /// Gives back `Temporal` values rather than this client's four
+    /// temporal classes, for every statement on this connection.
+    ///
+    /// Refused here, when the runtime has no `Temporal`, rather than at
+    /// the first row that happens to hold a date: a program that asked
+    /// for this and was quietly given something else would find out on
+    /// the one code path its tests did not cover. Node 26 and the
+    /// current browsers have `Temporal`, Node 24 has it behind
+    /// `--harmony-temporal`, and a program that cannot be sure of its
+    /// runtime uses `toTemporal()` on the value it wants instead.
+    ///
+    /// On the connection and not on a statement, because both spellings
+    /// are exact and a program picks the one it wants to read for as
+    /// long as it lives, where `bigIntMode` is a trade a single query
+    /// makes.
+    ///
+    /// A time with an offset keeps its class either way, because
+    /// `Temporal` has no type for one.
+    pub temporal: Option<bool>,
 }
 
 /// One connection to one database.
@@ -81,9 +101,9 @@ pub struct Connection {
     /// to the session and is the same one for the connection's whole
     /// life, so once is enough.
     interrupt: Interrupt,
-    /// How this connection's statements spell INT64, unless one of them
-    /// asks for the other spelling.
-    ints: Ints,
+    /// How this connection's statements spell the values they give
+    /// back, unless one of them asks for something else.
+    spelling: Spelling,
     path: String,
     read_only: bool,
 }
@@ -94,13 +114,23 @@ pub struct Connection {
 /// program expects and what every embedded database does. A read-only
 /// connection never creates anything.
 #[napi(ts_return_type = "Promise<Connection>")]
-pub fn connect(path: String, options: Option<ConnectOptions>) -> AsyncTask<ConnectTask> {
-    AsyncTask::new(ConnectTask { path, options })
+pub fn connect(env: &Env, path: String, options: Option<ConnectOptions>) -> AsyncTask<ConnectTask> {
+    // Whether this runtime has `Temporal` is a question only the thread
+    // that owns the runtime may ask, so it is asked here and carried to
+    // the thread that opens the database, where the answer decides
+    // whether there is anything to open.
+    let has_temporal = temporal::present(env).unwrap_or(false);
+    AsyncTask::new(ConnectTask {
+        path,
+        options,
+        has_temporal,
+    })
 }
 
 pub struct ConnectTask {
     path: String,
     options: Option<ConnectOptions>,
+    has_temporal: bool,
 }
 
 impl<'task> ScopedTask<'task> for ConnectTask {
@@ -127,6 +157,22 @@ impl<'task> ScopedTask<'task> for ConnectTask {
             },
             None => Ints::default(),
         };
+        // And for the same reason: a program that asked for `Temporal`
+        // on a runtime without one is a program that is not going to
+        // work, and hearing so from the connect is hearing it before
+        // anything has been written.
+        let wants_temporal = self
+            .options
+            .as_ref()
+            .and_then(|options| options.temporal)
+            .unwrap_or(false);
+        if wants_temporal && !self.has_temporal {
+            return Ok(Err(Failure::Usage(temporal::MISSING.to_string())));
+        }
+        let spelling = Spelling {
+            ints,
+            temporal: wants_temporal,
+        };
         let mut config = Config::new().read_only(read_only);
         if let Some(options) = &self.options {
             if let Some(limit) = &options.memory_limit {
@@ -138,7 +184,7 @@ impl<'task> ScopedTask<'task> for ConnectTask {
             }
         }
         Ok(open(PathBuf::from(&self.path), read_only, config)
-            .map(|opened| Opened { ints, ..opened })
+            .map(|opened| Opened { spelling, ..opened })
             .map_err(Failure::Engine))
     }
 
@@ -148,7 +194,7 @@ impl<'task> ScopedTask<'task> for ConnectTask {
             interrupt: opened.conn.interrupt(),
             inner: Arc::new(Mutex::new(Some(opened.conn))),
             alive: Arc::new(AtomicBool::new(true)),
-            ints: opened.ints,
+            spelling: opened.spelling,
             path: opened.path,
             read_only: opened.read_only,
         }
@@ -183,7 +229,7 @@ fn wire_disposal(env: &Env, instance: &mut ClassInstance<'_, Connection>) -> Res
 
 pub struct Opened {
     conn: zudb::Connection,
-    ints: Ints,
+    spelling: Spelling,
     path: String,
     read_only: bool,
 }
@@ -204,7 +250,7 @@ fn open(path: PathBuf, read_only: bool, config: Config) -> std::result::Result<O
     let conn = database.connect()?;
     Ok(Opened {
         conn,
-        ints: Ints::default(),
+        spelling: Spelling::default(),
         path: stored,
         read_only,
     })
@@ -292,11 +338,11 @@ impl Connection {
         // owns the runtime may do. So is adding the listener the signal
         // is watched through.
         let bound = if self.alive.load(Ordering::Acquire) {
-            int_mode(options.as_ref(), self.ints).and_then(|ints| {
+            self.spell(options.as_ref()).and_then(|spelling| {
                 let batch_rows = batch_rows(options.as_ref())?;
                 Ok((
                     bind(env, params)?,
-                    ints,
+                    spelling,
                     batch_rows,
                     watch(env, options, self.interrupt.clone())?,
                 ))
@@ -304,9 +350,11 @@ impl Connection {
         } else {
             Err(CLOSED.to_string())
         };
-        let (params, ints, batch_rows, watch, refused) = match bound {
-            Ok((params, ints, batch_rows, watch)) => (params, ints, batch_rows, watch, None),
-            Err(message) => (Vec::new(), self.ints, None, None, Some(message)),
+        let (params, spelling, batch_rows, watch, refused) = match bound {
+            Ok((params, spelling, batch_rows, watch)) => {
+                (params, spelling, batch_rows, watch, None)
+            }
+            Err(message) => (Vec::new(), self.spelling, None, None, Some(message)),
         };
         stream::open(
             Started {
@@ -314,7 +362,7 @@ impl Connection {
                 alive: Arc::clone(&self.alive),
                 statement,
                 params,
-                ints,
+                spelling,
                 batch_rows,
                 guard: watch.as_ref().map(Watch::guard),
             },
@@ -343,28 +391,42 @@ impl Connection {
         // the thread that owns the runtime may do. So is adding the
         // listener the signal is watched through.
         let bound = if self.alive.load(Ordering::Acquire) {
-            int_mode(options.as_ref(), self.ints).and_then(|ints| {
+            self.spell(options.as_ref()).and_then(|spelling| {
                 Ok((
                     bind(env, params)?,
-                    ints,
+                    spelling,
                     watch(env, options, self.interrupt.clone())?,
                 ))
             })
         } else {
             Err(CLOSED.to_string())
         };
-        let (params, ints, watch, refused) = match bound {
-            Ok((params, ints, watch)) => (params, ints, watch, None),
-            Err(message) => (Vec::new(), self.ints, None, Some(message)),
+        let (params, spelling, watch, refused) = match bound {
+            Ok((params, spelling, watch)) => (params, spelling, watch, None),
+            Err(message) => (Vec::new(), self.spelling, None, Some(message)),
         };
         QueryTask {
             inner: Arc::clone(&self.inner),
             statement,
             params,
-            ints,
+            spelling,
             watch,
             refused,
         }
+    }
+
+    /// How this statement spells the values it gives back, which is the
+    /// connection's own unless the statement said otherwise.
+    ///
+    /// Only the integers can be said otherwise. `Temporal` is a decision
+    /// about how a whole program reads dates and both spellings are
+    /// exact, where the integer modes are a trade one query makes and
+    /// the next one does not.
+    fn spell(&self, options: Option<&Object<'_>>) -> std::result::Result<Spelling, String> {
+        Ok(Spelling {
+            ints: int_mode(options, self.spelling.ints)?,
+            ..self.spelling
+        })
     }
 
     /// Closes the connection and releases the database.
@@ -576,8 +638,8 @@ pub struct QueryTask {
     inner: Arc<Mutex<Option<zudb::Connection>>>,
     statement: String,
     params: Vec<(String, Value)>,
-    /// How this statement spells the INT64s it gives back.
-    ints: Ints,
+    /// How this statement spells the values it gives back.
+    spelling: Spelling,
     /// The signal watching this statement, when the caller gave one.
     watch: Option<Watch>,
     /// Why this statement is not going to run, when it is not.
@@ -626,7 +688,7 @@ impl QueryTask {
             .iter()
             .map(|(name, value)| (name.as_str(), value.clone()))
             .collect();
-        let shape = Shape::of(conn.session_mut().catalog(), self.ints);
+        let shape = Shape::of(conn.session_mut().catalog(), self.spelling);
         let result = conn.query_with(&self.statement, &params);
         if let Some(watch) = &self.watch {
             watch.leave();

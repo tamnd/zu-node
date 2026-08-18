@@ -35,7 +35,7 @@ use zudb::{Batch, Flow, Streamed, ZuError};
 
 use crate::cancel::{Guard, Watch};
 use crate::conn::{CLOSED, Failure, beside, failed, notices};
-use crate::value::{Ints, Shape, to_js};
+use crate::value::{Shape, Spelling, to_js};
 
 /// How many batches may sit between the statement and the reader.
 ///
@@ -197,7 +197,7 @@ pub struct Started {
     pub alive: Arc<AtomicBool>,
     pub statement: String,
     pub params: Vec<(String, Value)>,
-    pub ints: Ints,
+    pub spelling: Spelling,
     pub batch_rows: Option<u32>,
     pub guard: Option<Guard>,
 }
@@ -607,7 +607,7 @@ impl Started {
             guard.leave();
             return Err(Failure::Aborted);
         }
-        let shape = Arc::new(Shape::of(conn.session_mut().catalog(), self.ints));
+        let shape = Arc::new(Shape::of(conn.session_mut().catalog(), self.spelling));
         let params: Vec<(&str, Value)> = self
             .params
             .iter()

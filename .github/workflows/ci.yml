@@ -63,11 +63,11 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         # 24 is the active LTS and the version the package requires. 26
-        # is the current release, and the one where Temporal is
-        # unflagged, so it is where the opt-in of a later milestone will
-        # be exercised. Bun and Deno join this matrix with the line of
-        # DX3 that claims them, since claiming a runtime nothing runs on
-        # is how a client acquires a broken runtime.
+        # is the current release and the one where Temporal is
+        # unflagged, so the temporal tests run there without anything
+        # being asked for. Bun and Deno join this matrix with the line
+        # of DX3 that claims them, since claiming a runtime nothing runs
+        # on is how a client acquires a broken runtime.
         node: [24, 26]
     runs-on: ${{ matrix.os }}
     steps:
@@ -82,3 +82,11 @@ jobs:
       # the engine is several minutes of LTO per row of the matrix.
       - run: npm run build:debug
       - run: npm test
+      # The same suite again with Temporal turned on, because on 24 it
+      # is behind a flag and the temporal tests skip themselves without
+      # it, and a test that skips everywhere is a test that proves
+      # nothing. Only on 24: 26 has Temporal unflagged, so the run above
+      # is already that run, and the flag it would be passed there is
+      # one V8 no longer has.
+      - run: npm run test:temporal
+        if: matrix.node == 24

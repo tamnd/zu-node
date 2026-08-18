@@ -62,9 +62,11 @@
     "build": "napi build --platform --release --js binding.cjs --dts binding.d.cts",
     "build:debug": "napi build --platform --js binding.cjs --dts binding.d.cts",
     "test": "node --test \"test/*.test.mjs\"",
+    "test:temporal": "node --harmony-temporal --test \"test/*.test.mjs\"",
     "check:types": "tsc --noEmit --project test/types/tsconfig.json",
     "check:package": "attw --pack .",
-    "bench": "node bench/query.mjs"
+    "bench": "node bench/query.mjs",
+    "bench:temporal": "node --harmony-temporal bench/query.mjs"
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.2",
