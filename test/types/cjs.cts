@@ -4,6 +4,19 @@
 
 import { connect, isZuError, type ZuParam, type ZuStream } from 'zudb'
 
+export async function total(path: string): Promise<number> {
+  // The mode is on the statement here, so the rows it gives back are
+  // numbers and adding them up needs no conversion. A `bigint` row type
+  // over the same call would not compile, which is the point of writing
+  // it down.
+  const conn = await connect(path, { bigIntMode: 'bigint' })
+  const rows = await conn.query<{ n: number }>('MATCH (p:person) RETURN count(*) AS n', null, {
+    bigIntMode: 'number',
+  })
+  conn.close()
+  return rows.reduce((sum, row) => sum + row.n, 0)
+}
+
 export async function insert(path: string, values: Record<string, ZuParam>): Promise<void> {
   const conn = await connect(path)
   try {

@@ -28,7 +28,7 @@ use zudb::{Config, Database, DiagnosticRecord, Interrupt, ZuError};
 use crate::cancel::Watch;
 use crate::error::{aborted, raise, usage};
 use crate::stream::{self, Started, ZuCursor};
-use crate::value::{Names, from_js, to_js};
+use crate::value::{Ints, Shape, from_js, to_js};
 
 /// What a connection can be opened with.
 ///
@@ -45,6 +45,11 @@ pub struct ConnectOptions {
     pub memory_limit: Option<BigInt>,
     /// How many threads the executor may use.
     pub threads: Option<u32>,
+    /// How INT64 comes back, for every statement on this connection.
+    /// `bigint` unless it is said otherwise here, and a statement may
+    /// say otherwise again for itself.
+    #[napi(ts_type = "ZuBigIntMode")]
+    pub big_int_mode: Option<String>,
 }
 
 /// One connection to one database.
@@ -76,6 +81,9 @@ pub struct Connection {
     /// to the session and is the same one for the connection's whole
     /// life, so once is enough.
     interrupt: Interrupt,
+    /// How this connection's statements spell INT64, unless one of them
+    /// asks for the other spelling.
+    ints: Ints,
     path: String,
     read_only: bool,
 }
@@ -96,7 +104,7 @@ pub struct ConnectTask {
 }
 
 impl<'task> ScopedTask<'task> for ConnectTask {
-    type Output = std::result::Result<Opened, ZuError>;
+    type Output = std::result::Result<Opened, Failure>;
     type JsValue = ClassInstance<'task, Connection>;
 
     fn compute(&mut self) -> Result<Self::Output> {
@@ -105,6 +113,20 @@ impl<'task> ScopedTask<'task> for ConnectTask {
             .as_ref()
             .and_then(|options| options.read_only)
             .unwrap_or(false);
+        // Before the open, because a mode nobody can spell is a mistake
+        // in the calling program and a database created on the way to
+        // finding it out is a file the caller did not ask for.
+        let ints = match self
+            .options
+            .as_ref()
+            .and_then(|options| options.big_int_mode.as_deref())
+        {
+            Some(mode) => match Ints::named(mode) {
+                Ok(ints) => ints,
+                Err(message) => return Ok(Err(Failure::Usage(message))),
+            },
+            None => Ints::default(),
+        };
         let mut config = Config::new().read_only(read_only);
         if let Some(options) = &self.options {
             if let Some(limit) = &options.memory_limit {
@@ -115,15 +137,18 @@ impl<'task> ScopedTask<'task> for ConnectTask {
                 config = config.threads(threads as usize);
             }
         }
-        Ok(open(PathBuf::from(&self.path), read_only, config))
+        Ok(open(PathBuf::from(&self.path), read_only, config)
+            .map(|opened| Opened { ints, ..opened })
+            .map_err(Failure::Engine))
     }
 
     fn resolve(&mut self, env: &'task Env, output: Self::Output) -> Result<Self::JsValue> {
-        let opened = output.map_err(|err| raise(env, err))?;
+        let opened = output.map_err(|failure| failed(env, failure, None))?;
         let mut instance = Connection {
             interrupt: opened.conn.interrupt(),
             inner: Arc::new(Mutex::new(Some(opened.conn))),
             alive: Arc::new(AtomicBool::new(true)),
+            ints: opened.ints,
             path: opened.path,
             read_only: opened.read_only,
         }
@@ -158,6 +183,7 @@ fn wire_disposal(env: &Env, instance: &mut ClassInstance<'_, Connection>) -> Res
 
 pub struct Opened {
     conn: zudb::Connection,
+    ints: Ints,
     path: String,
     read_only: bool,
 }
@@ -178,6 +204,7 @@ fn open(path: PathBuf, read_only: bool, config: Config) -> std::result::Result<O
     let conn = database.connect()?;
     Ok(Opened {
         conn,
+        ints: Ints::default(),
         path: stored,
         read_only,
     })
@@ -265,9 +292,11 @@ impl Connection {
         // owns the runtime may do. So is adding the listener the signal
         // is watched through.
         let bound = if self.alive.load(Ordering::Acquire) {
-            batch_rows(options.as_ref()).and_then(|batch_rows| {
+            int_mode(options.as_ref(), self.ints).and_then(|ints| {
+                let batch_rows = batch_rows(options.as_ref())?;
                 Ok((
                     bind(env, params)?,
+                    ints,
                     batch_rows,
                     watch(env, options, self.interrupt.clone())?,
                 ))
@@ -275,9 +304,9 @@ impl Connection {
         } else {
             Err(CLOSED.to_string())
         };
-        let (params, batch_rows, watch, refused) = match bound {
-            Ok((params, batch_rows, watch)) => (params, batch_rows, watch, None),
-            Err(message) => (Vec::new(), None, None, Some(message)),
+        let (params, ints, batch_rows, watch, refused) = match bound {
+            Ok((params, ints, batch_rows, watch)) => (params, ints, batch_rows, watch, None),
+            Err(message) => (Vec::new(), self.ints, None, None, Some(message)),
         };
         stream::open(
             Started {
@@ -285,6 +314,7 @@ impl Connection {
                 alive: Arc::clone(&self.alive),
                 statement,
                 params,
+                ints,
                 batch_rows,
                 guard: watch.as_ref().map(Watch::guard),
             },
@@ -313,19 +343,25 @@ impl Connection {
         // the thread that owns the runtime may do. So is adding the
         // listener the signal is watched through.
         let bound = if self.alive.load(Ordering::Acquire) {
-            bind(env, params)
-                .and_then(|params| Ok((params, watch(env, options, self.interrupt.clone())?)))
+            int_mode(options.as_ref(), self.ints).and_then(|ints| {
+                Ok((
+                    bind(env, params)?,
+                    ints,
+                    watch(env, options, self.interrupt.clone())?,
+                ))
+            })
         } else {
             Err(CLOSED.to_string())
         };
-        let (params, watch, refused) = match bound {
-            Ok((params, watch)) => (params, watch, None),
-            Err(message) => (Vec::new(), None, Some(message)),
+        let (params, ints, watch, refused) = match bound {
+            Ok((params, ints, watch)) => (params, ints, watch, None),
+            Err(message) => (Vec::new(), self.ints, None, Some(message)),
         };
         QueryTask {
             inner: Arc::clone(&self.inner),
             statement,
             params,
+            ints,
             watch,
             refused,
         }
@@ -488,6 +524,30 @@ fn batch_rows(options: Option<&Object<'_>>) -> std::result::Result<Option<u32>, 
     }
 }
 
+/// Reads `options.bigIntMode`, which is how this statement spells the
+/// INT64s it gives back.
+///
+/// Absent means the connection's own, which is `bigint` unless the
+/// program said otherwise when it connected. A statement may say
+/// otherwise again, because the reason to ask for numbers is usually
+/// one query whose rows are about to be serialized rather than a whole
+/// program's worth of them.
+fn int_mode(options: Option<&Object<'_>>, connection: Ints) -> std::result::Result<Ints, String> {
+    let Some(options) = options else {
+        return Ok(connection);
+    };
+    let mode: Unknown<'_> = options
+        .get_named_property("bigIntMode")
+        .map_err(|err| err.reason)?;
+    match mode.get_type().map_err(|err| err.reason)? {
+        ValueType::Undefined | ValueType::Null => Ok(connection),
+        ValueType::String => Ints::named(&String::from_unknown(mode).map_err(|err| err.reason)?),
+        other => Err(format!(
+            "bigIntMode is a {other}, and a mode is named by a string"
+        )),
+    }
+}
+
 /// Reads the parameter object into the values the engine binds.
 ///
 /// Every failure comes back as the message to refuse the call with,
@@ -516,6 +576,8 @@ pub struct QueryTask {
     inner: Arc<Mutex<Option<zudb::Connection>>>,
     statement: String,
     params: Vec<(String, Value)>,
+    /// How this statement spells the INT64s it gives back.
+    ints: Ints,
     /// The signal watching this statement, when the caller gave one.
     watch: Option<Watch>,
     /// Why this statement is not going to run, when it is not.
@@ -528,7 +590,7 @@ impl QueryTask {
     /// The names are read while the lock is held, because a catalog
     /// borrowed from the connection cannot outlive it and a result that
     /// names its tables has to carry them.
-    fn run(&mut self) -> std::result::Result<(QueryResult, Names), Failure> {
+    fn run(&mut self) -> std::result::Result<(QueryResult, Shape), Failure> {
         if let Some(message) = self.refused.take() {
             return Err(Failure::Usage(message));
         }
@@ -564,7 +626,7 @@ impl QueryTask {
             .iter()
             .map(|(name, value)| (name.as_str(), value.clone()))
             .collect();
-        let names = Names::of(conn.session_mut().catalog());
+        let shape = Shape::of(conn.session_mut().catalog(), self.ints);
         let result = conn.query_with(&self.statement, &params);
         if let Some(watch) = &self.watch {
             watch.leave();
@@ -577,7 +639,7 @@ impl QueryTask {
                 return Err(Failure::Aborted);
             }
         }
-        Ok((result?, names))
+        Ok((result?, shape))
     }
 
     /// The exception this rejects the caller's promise with.
@@ -595,7 +657,7 @@ impl QueryTask {
 }
 
 impl<'task> ScopedTask<'task> for QueryTask {
-    type Output = std::result::Result<(QueryResult, Names), Failure>;
+    type Output = std::result::Result<(QueryResult, Shape), Failure>;
     type JsValue = Array<'task>;
 
     fn compute(&mut self) -> Result<Self::Output> {
@@ -603,8 +665,8 @@ impl<'task> ScopedTask<'task> for QueryTask {
     }
 
     fn resolve(&mut self, env: &'task Env, output: Self::Output) -> Result<Self::JsValue> {
-        let (result, names) = output.map_err(|failure| self.failed(env, failure))?;
-        rows(env, &result, &names)
+        let (result, shape) = output.map_err(|failure| self.failed(env, failure))?;
+        rows(env, &result, &shape)
     }
 
     fn finally(mut self, env: Env) -> Result<()> {
@@ -623,12 +685,12 @@ impl<'task> ScopedTask<'task> for QueryTask {
 /// that does not. Out of the way means not enumerable, so that the
 /// array spreads, stringifies, deep-equals a plain array and answers
 /// `Object.keys` as though they were not there at all.
-fn rows<'env>(env: &'env Env, result: &QueryResult, names: &Names) -> Result<Array<'env>> {
+fn rows<'env>(env: &'env Env, result: &QueryResult, shape: &Shape) -> Result<Array<'env>> {
     let mut array = env.create_array(result.rows.len() as u32)?;
     for (ix, row) in result.rows.iter().enumerate() {
         let mut object = Object::new(env)?;
         for (column, value) in result.columns.iter().zip(row) {
-            object.set(column.as_str(), to_js(env, value, names)?)?;
+            object.set(column.as_str(), to_js(env, column, value, shape)?)?;
         }
         array.set(ix as u32, object)?;
     }

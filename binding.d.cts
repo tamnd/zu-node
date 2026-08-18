@@ -7,7 +7,9 @@
  * INT64 is `bigint` and FLOAT is `number`, which is the one rule worth
  * learning before anything else here: a JavaScript number stops being
  * exact at 2^53 and zu's integers go to 2^63, so a count that came back
- * as a number would be a count you cannot trust.
+ * as a number would be a count you cannot trust. `bigIntMode` changes
+ * that for a statement or for a connection, with the hazard it
+ * documents.
  */
 export type ZuValue =
   | null
@@ -149,6 +151,34 @@ export interface ZuStreamOptions extends ZuStatementOptions {
 }
 
 /**
+ * How INT64 is spelled on the way out.
+ *
+ * `bigint` is the default and is the only one of the two that is always
+ * right, because zu's integers go to 2^63 and a JavaScript number stops
+ * telling one integer from the next at 2^53.
+ *
+ * `number` is for the program that has already decided its integers are
+ * small: ids that count in millions, a `count(*)` over a table that
+ * will never be one, a row about to be handed to `JSON.stringify`,
+ * which cannot serialize a `bigint` at all. It is worth knowing exactly
+ * what is being traded for that. Which integers a database holds is a
+ * property of the data and not of the program, so a query that returned
+ * numbers for every row of a test database is a query that can meet a
+ * larger one in production. This client refuses that row rather than
+ * rounding it, with a `ZuUsageError` naming the column and the value,
+ * so the failure is loud and local rather than an answer that is quietly
+ * off by one. It is still a failure that arrives at read time, on a
+ * machine that is not yours, which is why the default is the other one.
+ *
+ * The mode reaches the INT64 columns of a result and nothing else. A
+ * node's `offset`, an edge's `src`, `dst` and `ord`, and the nanosecond
+ * counts of the temporal classes stay `bigint` in both modes, because
+ * they are properties of classes the addon registers once and not
+ * values a statement can respell.
+ */
+export type ZuBigIntMode = 'bigint' | 'number'
+
+/**
  * What a statement takes beside its parameters.
  *
  * An object rather than a bare signal, because the options that follow
@@ -156,6 +186,12 @@ export interface ZuStreamOptions extends ZuStatementOptions {
  * is one nobody can read at a call site.
  */
 export interface ZuStatementOptions {
+  /**
+   * How INT64 comes back from this statement. `bigint` unless the
+   * connection was opened with the other mode, and either way a
+   * statement may name the one it wants.
+   */
+  readonly bigIntMode?: ZuBigIntMode
   /**
    * Stops the statement when it fires, through the same interrupt a
    * shell answers `Ctrl-C` with: the executor notices at the boundary it
@@ -485,6 +521,12 @@ export interface ConnectOptions {
   memoryLimit?: bigint
   /** How many threads the executor may use. */
   threads?: number
+  /**
+   * How INT64 comes back, for every statement on this connection.
+   * `bigint` unless it is said otherwise here, and a statement may
+   * say otherwise again for itself.
+   */
+  bigIntMode?: ZuBigIntMode
 }
 
 /** The version of the client. */
