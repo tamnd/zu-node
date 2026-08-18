@@ -1,1 +1,13 @@
 .DS_Store
+target/
+node_modules/
+dist/
+
+# The built addon, which napi drops into the source tree so that the
+# tests load the same file a published package would.
+*.node
+
+# A local override pointing at a checkout of the engine instead of the
+# pinned revision. Untracked on purpose: the pin is what the release
+# builds against.
+.cargo/config.toml

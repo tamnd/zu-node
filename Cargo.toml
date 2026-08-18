@@ -1,0 +1,43 @@
+[package]
+name = "zudb-node"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.97"
+license = "Apache-2.0"
+repository = "https://github.com/tamnd/zu-node"
+authors = ["Tam Nguyen <tamnd87@gmail.com>"]
+publish = false
+
+[lib]
+name = "zudb"
+crate-type = ["cdylib"]
+
+[dependencies]
+# The engine, by revision rather than by version. Nothing is published
+# yet, and a binding is built against the engine commit it will ship
+# with (ADR 0002), so a revision is the honest way to say which one.
+# A local checkout is used instead with a `paths` override in
+# `.cargo/config.toml`, which is untracked on purpose.
+zudb = { package = "zu", git = "https://github.com/tamnd/zu", rev = "1b6575a9f258d467d7fce56ebd594b42d247789f" }
+zu-common = { git = "https://github.com/tamnd/zu", rev = "1b6575a9f258d467d7fce56ebd594b42d247789f" }
+# N-API by way of napi-rs (ADR 0002). `napi9` is the version of N-API
+# this addon declares it needs, which is what makes one binary work
+# across Node 24, Node 26, Electron and Bun without a rebuild: the
+# runtime promises everything up to the declared version and the addon
+# promises to ask for nothing above it. Node 24 is the oldest runtime
+# this supports and it has N-API 10, so 9 is a floor with a version to
+# spare rather than the highest number that happens to work here.
+napi = { version = "3", default-features = false, features = ["napi9"] }
+napi-derive = "3"
+
+[build-dependencies]
+napi-build = "2"
+
+[profile.release]
+# The same shape the engine's own release profile has, because what
+# ships here is the engine: one codegen unit and fat LTO across the
+# crate graph, which is worth the build minutes on an artifact that is
+# built once per release and downloaded by everyone.
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
