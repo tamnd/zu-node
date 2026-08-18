@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
-import { abiVersion, connect, version } from '../index.js'
+import { abiVersion, connect, version } from 'zudb'
 import { fresh, twoPeople } from './helper.mjs'
 
 test('the client says which version it is and which ABI it implements', () => {

@@ -1,0 +1,24 @@
+{
+  "//": [
+    "What a TypeScript user's compiler does with this package.",
+    "node16 for both module and moduleResolution, because that is the",
+    "one setting that reads the `exports` map the way Node does: a",
+    "resolver on the old `node` algorithm never sees a condition and so",
+    "never catches a package that named the wrong file in one of them.",
+    "The two fixtures import by package name rather than by path, which",
+    "resolves through `exports` exactly as an installed copy would."
+  ],
+  "compilerOptions": {
+    "module": "node16",
+    "moduleResolution": "node16",
+    "target": "es2023",
+    "lib": ["ES2023", "ESNext.Disposable"],
+    "types": ["node"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": false,
+    "exactOptionalPropertyTypes": true,
+    "noUncheckedIndexedAccess": true
+  },
+  "files": ["esm.mts", "cjs.cts"]
+}

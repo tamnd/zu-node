@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { ZuDate, ZuDuration, ZuTime, ZuTimestamp } from '../index.js'
+import { ZuDate, ZuDuration, ZuTime, ZuTimestamp } from 'zudb'
 import { fresh, twoPeople } from './helper.mjs'
 
 // What a parameter binds as is what comes back, so one statement that
