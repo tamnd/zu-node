@@ -143,12 +143,15 @@ jobs:
       # no target flag: inside the image the default target is the musl
       # one. The crt-static override is what makes a shared object
       # possible at all on musl, whose default is to link the C runtime
-      # statically into everything.
+      # statically into everything. The linker is named because Rust's
+      # aarch64 musl target asks for aarch64-linux-musl-gcc, which is
+      # what a cross toolchain calls its compiler and not what a machine
+      # compiling for itself has: on Alpine the compiler is gcc.
       - name: Build, inside Alpine
         if: matrix.alpine != ''
         run: |
           docker run --rm -v "$PWD":/work -w /work \
-            -e RUSTFLAGS="-C target-feature=-crt-static" \
+            -e RUSTFLAGS="-C target-feature=-crt-static -C linker=gcc" \
             ${{ matrix.alpine }} sh -c '
               set -eu
               apk add --no-cache nodejs npm rustup build-base
