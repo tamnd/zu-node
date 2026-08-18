@@ -170,13 +170,15 @@ Bun and Deno in CI, and the WASM build for the browser.
 
 | Runtime | How | Notes |
 |---|---|---|
-| Node >= 24 (LTS) | prebuilt N-API binary | CI runs 24 and 26 |
-| Bun >= 1.3 | the same binary | tested as a first-class target, not assumed |
-| Deno >= 2.9 | the same binary via `npm:zudb`, or `jsr:@zu/zudb` | needs `--allow-ffi --allow-read` |
+| Node >= 24 (LTS) | prebuilt N-API binary | CI runs 24 and 26, and 24 again with `--harmony-temporal` |
+| Bun >= 1.3 | the same binary | CI runs the whole suite on it |
+| Deno >= 2.9 | the same binary via `npm:zudb`, or `jsr:@zu/zudb` | CI runs the whole suite on it, with `--allow-read --allow-write --allow-env --allow-ffi` |
 | Browser and edge | `zudb/wasm` | read-mostly, over OPFS or HTTP range requests |
 | Electron | the same binary | N-API is ABI-stable across Electron versions, so no per-Electron rebuild |
 
 `apache-arrow` is an optional peer dependency behind the `zudb/arrow` entry point, so the base package stays small.
+
+One binary serves all three, because N-API is the ABI all three implement, and the whole suite runs on each of them in CI rather than the other two being assumed from Node passing. `npm run test:bun` and `npm run test:deno` run it locally. What the three do not agree on is what a native error carries: V8 writes a `stack` when the error is made and JavaScriptCore writes none at all through N-API, so this client writes the header line itself when it finds none, non-enumerably, and `err.stack` starts with the condition's name on all of them.
 
 ## Specification
 

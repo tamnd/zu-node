@@ -90,3 +90,49 @@ jobs:
       # one V8 no longer has.
       - run: npm run test:temporal
         if: matrix.node == 24
+
+  # Bun and Deno run the same suite over the same binary, because the
+  # binary is the same one: N-API is the ABI all three implement, and a
+  # runtime this package claims and nothing runs on is a runtime this
+  # package has broken. Node builds the addon in both jobs, since the
+  # build is napi-rs and cargo and neither has anything to do with which
+  # runtime is going to load what they made.
+  bun:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - uses: Swatinem/rust-cache@v2
+      - run: npm ci
+      - run: npm run build:debug
+      # `bun test` and not `bun run`, because the tests are written
+      # against `node:test` and Bun's shim for it refuses to register a
+      # test outside its own runner.
+      - run: npm run test:bun
+
+  deno:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: 2.9.5
+      - uses: Swatinem/rust-cache@v2
+      - run: npm ci
+      - run: npm run build:debug
+      # Permissions rather than `-A`, so the list a Deno user has to
+      # write is a list this job has proved is enough. `--no-check` is
+      # about the checkout and not about the package: the tests reach
+      # the declarations through relative paths here rather than through
+      # `npm:zudb`, and Deno reads the `.cjs` beside them as a module
+      # with an `export =` in it. The package job above is what checks
+      # the types, through the resolution a user actually gets.
+      - run: npm run test:deno
