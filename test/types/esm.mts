@@ -7,6 +7,7 @@ import {
   isZuError,
   ZuDate,
   type ZuBatch,
+  type ZuBigIntMode,
   type ZuError,
   type ZuRows,
   type ZuStream,
@@ -73,6 +74,20 @@ export async function counted(path: string): Promise<number> {
   await web.cancel()
   await conn.close()
   return rows
+}
+
+export async function serialized(path: string, mode: ZuBigIntMode): Promise<string> {
+  // A connection with a mode of its own, and a statement that names one
+  // for itself. The row type is the caller's either way, which is the
+  // part TypeScript cannot check for them: a mode is a string at
+  // runtime and `id` is whatever they said it was.
+  await using conn = await connect(path, { bigIntMode: mode })
+  const rows: ZuRows<{ id: number; name: string }> = await conn.query(
+    'MATCH (p:person) RETURN p.id AS id, p.name AS name',
+    null,
+    { bigIntMode: 'number' },
+  )
+  return JSON.stringify(rows.map((row) => ({ ...row, id: row.id + 1 })))
 }
 
 export function retryable(caught: unknown): boolean {

@@ -74,6 +74,16 @@ const cases = [
     run: () => conn.query('MATCH (p:person) RETURN p.id AS id'),
   },
   {
+    // The same column spelled as a number instead of a `bigint`, which
+    // is the cost the other mode is usually asked for: a `bigint` is an
+    // allocation and a double is not, so the difference between these
+    // two is what a program buys with the hazard it takes on.
+    name: 'scan, one INT64 as a number',
+    per: 'row',
+    run: () =>
+      conn.query('MATCH (p:person) RETURN p.id AS id', null, { bigIntMode: 'number' }),
+  },
+  {
     name: 'scan, whole nodes',
     per: 'row',
     run: () => conn.query('MATCH (p:person) RETURN p AS p'),

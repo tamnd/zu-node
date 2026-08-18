@@ -35,7 +35,7 @@ use zudb::{Batch, Flow, Streamed, ZuError};
 
 use crate::cancel::{Guard, Watch};
 use crate::conn::{CLOSED, Failure, beside, failed, notices};
-use crate::value::{Names, to_js};
+use crate::value::{Ints, Shape, to_js};
 
 /// How many batches may sit between the statement and the reader.
 ///
@@ -65,7 +65,7 @@ const POISONED: &str = "the stream was left in an unknown state by a thread that
 /// them instead of a copy.
 pub struct Head {
     columns: Vec<String>,
-    names: Arc<Names>,
+    shape: Arc<Shape>,
 }
 
 /// What the thread running the statement sends back.
@@ -197,6 +197,7 @@ pub struct Started {
     pub alive: Arc<AtomicBool>,
     pub statement: String,
     pub params: Vec<(String, Value)>,
+    pub ints: Ints,
     pub batch_rows: Option<u32>,
     pub guard: Option<Guard>,
 }
@@ -489,7 +490,7 @@ fn batch<'env>(env: &'env Env, head: &Head, rows: &[Vec<Value>]) -> Result<Array
     for (ix, row) in rows.iter().enumerate() {
         let mut object = Object::new(env)?;
         for (column, value) in head.columns.iter().zip(row) {
-            object.set(column.as_str(), to_js(env, value, &head.names)?)?;
+            object.set(column.as_str(), to_js(env, column, value, &head.shape)?)?;
         }
         array.set(ix as u32, object)?;
     }
@@ -606,7 +607,7 @@ impl Started {
             guard.leave();
             return Err(Failure::Aborted);
         }
-        let names = Arc::new(Names::of(conn.session_mut().catalog()));
+        let shape = Arc::new(Shape::of(conn.session_mut().catalog(), self.ints));
         let params: Vec<(&str, Value)> = self
             .params
             .iter()
@@ -620,7 +621,7 @@ impl Started {
             let head = Arc::clone(head.get_or_insert_with(|| {
                 Arc::new(Head {
                     columns: batch.columns().to_vec(),
-                    names: Arc::clone(&names),
+                    shape: Arc::clone(&shape),
                 })
             }));
             Ok(self.hand(live, head, batch.rows().to_vec()))

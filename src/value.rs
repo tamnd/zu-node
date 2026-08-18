@@ -6,12 +6,16 @@
 //! a class with named fields rather than a tuple whose third element
 //! is the ordinal if you remember the order.
 //!
-//! INT64 is `bigint`, always, which is ADR 0003 in the engine
+//! INT64 is `bigint` by default, which is ADR 0003 in the engine
 //! repository. A JavaScript number is an IEEE double and stops being
 //! exact at 2^53, zu's integers go to 2^63, and `count(*)` over a
 //! large graph gets there on its own. A client that returns a number
 //! here is a client whose users file "the id came back wrong" a year
 //! later.
+//!
+//! A caller may ask for numbers anyway, with `bigIntMode: "number"`,
+//! and then an integer outside what a double holds exactly is refused
+//! rather than rounded. See [`Ints`].
 //!
 //! Going the other way a `number` that is a whole number binds as
 //! INT64 and one that is not binds as FLOAT, because `{ id: 1 }` is
@@ -26,6 +30,62 @@ use napi_derive::napi;
 use zu_common::{DurationKind, Temporal};
 use zudb::query::Value;
 use zudb::zu1::catalog::Catalog;
+
+use crate::error::usage;
+
+/// How an INT64 is spelled on the way out.
+///
+/// `bigint` is the default and the only one that is always right. The
+/// other exists because a program that already knows its integers are
+/// small spends a `Number(...)` on every one of them otherwise, and
+/// because a `bigint` has no JSON spelling, so a result holding one
+/// cannot be handed to `JSON.stringify` at all.
+///
+/// The hazard of the second is the whole reason it is not the default:
+/// which integers a database holds is a property of the data and not of
+/// the program, so a query that worked on every row of a test database
+/// is a query that can fail on the one row where an id passed 2^53.
+/// This client refuses that row rather than rounding it, which turns a
+/// wrong answer into a failure that names the column, and that is the
+/// most a client can do about a decision the caller has already made.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub enum Ints {
+    #[default]
+    BigInt,
+    Number,
+}
+
+impl Ints {
+    /// The mode `bigIntMode` names, or what is wrong with what it named.
+    pub fn named(mode: &str) -> std::result::Result<Ints, String> {
+        match mode {
+            "bigint" => Ok(Ints::BigInt),
+            "number" => Ok(Ints::Number),
+            other => Err(format!(
+                "bigIntMode is \"{other}\", and the modes are \"bigint\" and \"number\""
+            )),
+        }
+    }
+}
+
+/// What a result needs on the way out.
+///
+/// The table names are the statement's, and so is the spelling of its
+/// integers, so both are settled once where the connection is held and
+/// then read by every value of every row.
+pub struct Shape {
+    names: Names,
+    ints: Ints,
+}
+
+impl Shape {
+    pub fn of(catalog: &Catalog, ints: Ints) -> Shape {
+        Shape {
+            names: Names::of(catalog),
+            ints,
+        }
+    }
+}
 
 /// What the tables in a result are called.
 ///
@@ -357,14 +417,25 @@ fn day_time(nanos: i64) -> ZuDuration {
 }
 
 /// Turns an engine value into the JavaScript value it is.
-pub fn to_js<'env>(env: &'env Env, value: &Value, names: &Names) -> Result<Unknown<'env>> {
+///
+/// `column` is the name the value arrived under, carried the whole way
+/// down for the same reason [`from_js`] carries one up: the only thing
+/// that can fail here is an integer that will not fit the spelling the
+/// caller asked for, and a caller told which column that was can act on
+/// it, while one told the number alone has to go looking.
+pub fn to_js<'env>(
+    env: &'env Env,
+    column: &str,
+    value: &Value,
+    shape: &Shape,
+) -> Result<Unknown<'env>> {
     match value {
         Value::Null => Null.into_unknown(env),
         Value::Bool(b) => (*b).into_unknown(env),
-        Value::Int(n) => BigInt::from(*n).into_unknown(env),
+        Value::Int(n) => int(env, column, *n, shape.ints),
         Value::Float(f) => (*f).into_unknown(env),
         Value::Str(s) => s.as_str().into_unknown(env),
-        Value::Node { table, offset } => node(*table, *offset, names)
+        Value::Node { table, offset } => node(*table, *offset, &shape.names)
             .into_instance(env)?
             .into_unknown(env),
         Value::Rel {
@@ -372,25 +443,25 @@ pub fn to_js<'env>(env: &'env Env, value: &Value, names: &Names) -> Result<Unkno
             src,
             dst,
             ord,
-        } => rel(*table, *src, *dst, *ord, names)
+        } => rel(*table, *src, *dst, *ord, &shape.names)
             .into_instance(env)?
             .into_unknown(env),
         Value::List(items) => {
             let mut array = env.create_array(items.len() as u32)?;
             for (ix, item) in items.iter().enumerate() {
-                array.set(ix as u32, to_js(env, item, names)?)?;
+                array.set(ix as u32, to_js(env, column, item, shape)?)?;
             }
             array.into_unknown(env)
         }
         Value::Record(fields) => {
             let mut object = Object::new(env)?;
             for (name, field) in fields {
-                object.set(name.as_str(), to_js(env, field, names)?)?;
+                object.set(name.as_str(), to_js(env, column, field, shape)?)?;
             }
             object.into_unknown(env)
         }
         Value::Temporal(t) => temporal(env, *t),
-        Value::Path(walk) => path(env, walk, names),
+        Value::Path(walk) => path(env, walk, &shape.names),
         // The three the executor keeps to itself. A chain is settled
         // into an edge list before any value leaves the pipeline, and a
         // graph or a binding table is a handle to something that has no
@@ -398,6 +469,36 @@ pub fn to_js<'env>(env: &'env Env, value: &Value, names: &Names) -> Result<Unkno
         // result and the arm is here to be exhaustive rather than to
         // run.
         Value::Chain(_) | Value::Graph(_) | Value::BindingTable(_) => Null.into_unknown(env),
+    }
+}
+
+/// The largest integer a JavaScript number holds exactly, which is
+/// 2^53 - 1, and the smallest is its negation.
+///
+/// Past it the doubles run out of significand and start standing for
+/// two integers at once: 2^53 and 2^53 + 1 are the same double, so a
+/// number that came back from there cannot be turned into the integer
+/// it was.
+const EXACT: i64 = 9_007_199_254_740_991;
+
+/// An INT64, spelled the way this statement was asked to spell them.
+///
+/// The refusal is a usage error rather than a data error, because
+/// nothing is wrong with the value: it is a perfectly good INT64 and
+/// the program asked for a container that does not hold it. Naming the
+/// column and the value gives the caller the two things they need to
+/// decide whether to widen the mode or narrow the query.
+fn int<'env>(env: &'env Env, column: &str, n: i64, ints: Ints) -> Result<Unknown<'env>> {
+    match ints {
+        Ints::BigInt => BigInt::from(n).into_unknown(env),
+        Ints::Number if !(-EXACT..=EXACT).contains(&n) => Err(usage(
+            env,
+            format!(
+                "column {column} holds {n}, which a JavaScript number cannot tell from \
+                 its neighbours, and this statement asked for bigIntMode: \"number\""
+            ),
+        )),
+        Ints::Number => (n as f64).into_unknown(env),
     }
 }
 

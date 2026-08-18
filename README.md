@@ -27,7 +27,7 @@ The rows are an array, so iterating them is `for (const row of rows)` and nothin
 
 ## Decisions worth knowing before you start
 
-- **INT64 is `bigint`.** Always, by default. A JavaScript number stops being exact at 2^53 and zu's integers go to 2^63, so a count that came back as a number would be a count you cannot trust. `{ bigIntMode: "number" }` is planned, will be documented with its precision hazard, and will never be the default.
+- **INT64 is `bigint`.** By default, everywhere. A JavaScript number stops being exact at 2^53 and zu's integers go to 2^63, so a count that came back as a number would be a count you cannot trust. `{ bigIntMode: "number" }` asks for the other spelling, and the section below is what it costs.
 - **Nothing blocks the event loop.** Every native call runs on libuv's threadpool and hands back a promise before the statement has started. There is no synchronous variant, and the ones that arrive later will say in their own documentation that they belong in scripts, not servers.
 - **`await using` is the intended scoping.** A connection is `Symbol.asyncDispose`, and `close()` stays public for callers who cannot use the syntax.
 - **A failure is an ordinary `Error`.** Every `catch`, logger and rejection handler already knows what to do with one. What makes it a zu error is the fields, and none of them has to be parsed back out of the message: `code` is the GQLSTATUS and picks the branch, `condition` is the standard's own words for it, `line` and `column` and `excerpt` underline the token, and `retryable` decides whether a retry loop goes round again. A mistake this client caught before the engine saw it carries no `code` and is named `ZuUsageError`, so a caller mapping codes to branches can tell a missing code from one it does not recognize. `isZuError(caught)` is the exported guard for the `catch` clause, where the value is `unknown` and could be anything at all, and in TypeScript it narrows to the full shape.
@@ -35,7 +35,7 @@ The rows are an array, so iterating them is `for (const row of rows)` and nothin
 
 ## What works today
 
-`connect`, `query`, `exec`, `stream`, `close`, `dispose` and `await using`. Named parameters both ways, including lists, records and nesting. Every scalar the engine has, plus nodes, edges and paths with their tables named rather than numbered, and `ZuDate`, `ZuTime`, `ZuTimestamp` and `ZuDuration`. Read-only connections, memory and thread limits. An `AbortSignal` on any statement. The full error surface above, and `isZuError` to recognize it. Streaming, as an async iterable, as batches and as a Web Stream. Both module formats, typed separately.
+`connect`, `query`, `exec`, `stream`, `close`, `dispose` and `await using`. Named parameters both ways, including lists, records and nesting. Every scalar the engine has, plus nodes, edges and paths with their tables named rather than numbered, and `ZuDate`, `ZuTime`, `ZuTimestamp` and `ZuDuration`. Read-only connections, memory and thread limits. `bigIntMode`, per statement or per connection. An `AbortSignal` on any statement. The full error surface above, and `isZuError` to recognize it. Streaming, as an async iterable, as batches and as a Web Stream. Both module formats, typed separately.
 
 Build it with `npm run build`, and run the suite with `npm test`. Nothing is published yet, so `npm i zudb` is not a thing you can type at anybody's terminal, but everything it will do is built and installed on every run of the release workflow.
 
@@ -74,6 +74,26 @@ Between the statement and the loop sit two batches, which is the whole of the bu
 
 A statement that has to see every row before it can give one, which is `ORDER BY`, `DISTINCT` and the aggregates, runs whole and is handed over in batches afterwards. The loop is the same either way and `summary.streamed` is what tells them apart.
 
+## Asking for numbers instead of bigints
+
+`bigIntMode` says how INT64 is spelled on the way out. It goes on one statement, or on a connection for all of them, and a statement on a connection that named one may still name the other:
+
+```ts
+const conn = await connect("social.zu1", { bigIntMode: "number" });
+const rows = await conn.query<{ id: number }>(`MATCH (p:Person) RETURN p.id AS id`);
+JSON.stringify(rows); // works, which it does not with bigints in it
+
+const exact = await conn.query(`MATCH (p:Person) RETURN count(*) AS n`, null, {
+  bigIntMode: "bigint",
+});
+```
+
+Two things are usually behind the ask. `JSON.stringify` throws on a `bigint`, so a row holding one cannot be handed straight to a response, and arithmetic on a `bigint` will not mix with a `number`, so every `+` in the reporting code needs a conversion. Numbers are also slightly cheaper to make: on 50k rows here, one INT64 column costs about 190ns a row as numbers against about 220ns as bigints.
+
+What is traded for that is worth stating plainly, because it is the reason this is never the default. Which integers a database holds is a property of the data and not of the program, so a query that returned numbers for every row of a test database is a query that can meet a larger one in production. This client refuses that row rather than rounding it: an integer past 2^53 raises a `ZuUsageError` naming the column and the value, so the failure is loud and local instead of an answer that is quietly off by one. It is still a failure that arrives at read time, on a machine that is not yours.
+
+The mode reaches the INT64 columns of a result and nothing else. A node's `offset`, an edge's `src`, `dst` and `ord`, and the nanosecond counts on the temporal classes stay `bigint` in both modes, because they are properties of classes the addon registers once rather than values a statement can respell.
+
 ## Importing it, either way
 
 ```ts
@@ -106,7 +126,7 @@ Anything outside that table has no binary and no source build to fall back on, s
 
 ## Still to come
 
-`bigIntMode`. `toTemporal()` and `{ temporal: true }`, for the runtimes where Temporal is unflagged: it reached Stage 4 in March 2026 and is unflagged in Node 26, but Node 24 is still the active LTS and Safari is still behind a flag, which is why the stable types are the four classes above. Bun and Deno in CI, and the WASM build for the browser.
+`toTemporal()` and `{ temporal: true }`, for the runtimes where Temporal is unflagged: it reached Stage 4 in March 2026 and is unflagged in Node 26, but Node 24 is still the active LTS and Safari is still behind a flag, which is why the stable types are the four classes above. Bun and Deno in CI, and the WASM build for the browser.
 
 ## Runtimes
 
