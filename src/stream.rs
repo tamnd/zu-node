@@ -34,7 +34,7 @@ use zudb::query::Value;
 use zudb::{Batch, Flow, Streamed, ZuError};
 
 use crate::cancel::{Guard, Watch};
-use crate::conn::{CLOSED, Failure, beside, failed, notices};
+use crate::conn::{CLOSED, Failure, STREAMING, beside, failed, notices};
 use crate::value::{Shape, Spelling, to_js};
 
 /// How many batches may sit between the statement and the reader.
@@ -182,6 +182,79 @@ impl Pipe {
             held.done = true;
         }
         self.moved.notify_all();
+    }
+}
+
+/// The connection, out of the slot it lives in for as long as the
+/// statement runs.
+///
+/// Taken out rather than locked, and this is the difference between a
+/// stream and every other statement. A statement that holds the lock is
+/// a statement anything else on that connection waits behind, and
+/// waiting is right when the thing being waited for finishes on its
+/// own. A stream finishes when its reader says so, and its reader is
+/// the thread that would be doing the waiting, so a second statement
+/// that queued behind a half-read stream would be a program that stops
+/// and never starts again. An empty slot can be asked about instead:
+/// [`crate::conn::STREAMING`] is what the next statement is told, and
+/// it is told at once.
+///
+/// Put back by the drop, on every path out of the statement, because a
+/// connection that stayed out of its slot would be one this client had
+/// closed on the caller's behalf.
+struct Borrowed<'held> {
+    inner: &'held Arc<Mutex<Option<zudb::Connection>>>,
+    alive: &'held AtomicBool,
+    conn: Option<zudb::Connection>,
+}
+
+impl<'held> Borrowed<'held> {
+    fn take(
+        inner: &'held Arc<Mutex<Option<zudb::Connection>>>,
+        alive: &'held AtomicBool,
+    ) -> std::result::Result<Self, Failure> {
+        let mut held = inner
+            .lock()
+            .map_err(|_| Failure::Usage(POISONED.to_string()))?;
+        // Both readings of an empty slot are checked under the one lock
+        // that decides them, so a stream and a close that arrive
+        // together cannot both find the connection theirs.
+        let Some(conn) = held.take() else {
+            return Err(Failure::Usage(
+                match alive.load(Ordering::Acquire) {
+                    true => STREAMING,
+                    false => CLOSED,
+                }
+                .to_string(),
+            ));
+        };
+        Ok(Borrowed {
+            inner,
+            alive,
+            conn: Some(conn),
+        })
+    }
+
+    fn conn(&mut self) -> &mut zudb::Connection {
+        self.conn
+            .as_mut()
+            .expect("the connection is taken out only by the drop")
+    }
+}
+
+impl Drop for Borrowed<'_> {
+    fn drop(&mut self) {
+        let conn = self.conn.take();
+        if let Ok(mut held) = self.inner.lock() {
+            // A close that arrived while the statement was running
+            // found the slot empty and left `alive` false. Putting the
+            // connection back there would be opening again what the
+            // caller closed, so it is dropped here instead, which is
+            // what the close itself would have done.
+            if self.alive.load(Ordering::Acquire) {
+                *held = conn;
+            }
+        }
     }
 }
 
@@ -591,13 +664,8 @@ impl Started {
     /// Takes the connection, runs the statement, and hands every batch
     /// over.
     fn stream(&self, live: &Live) -> std::result::Result<Streamed, Failure> {
-        let mut held = self
-            .inner
-            .lock()
-            .map_err(|_| Failure::Usage(POISONED.to_string()))?;
-        let Some(conn) = held.as_mut() else {
-            return Err(Failure::Usage(CLOSED.to_string()));
-        };
+        let mut borrowed = Borrowed::take(&self.inner, &self.alive)?;
+        let conn = borrowed.conn();
         // From here the connection is this statement's, so this is
         // where a signal can start stopping it. A signal that fired
         // first ends the statement without the engine ever seeing it.

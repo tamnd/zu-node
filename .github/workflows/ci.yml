@@ -91,6 +91,90 @@ jobs:
       - run: npm run test:temporal
         if: matrix.node == 24
 
+  # The same suite again, over an addon built with AddressSanitizer.
+  #
+  # There is no `unsafe` in this crate, which is the reason to run this
+  # rather than the reason not to: what a binding gets wrong is not
+  # arithmetic on a raw pointer but a handle used after the scope that
+  # owned it closed, a buffer read on a thread the runtime had already
+  # taken back, an engine allocation freed on one side of the boundary
+  # and touched from the other. None of those are `unsafe` blocks here
+  # and every one of them is a use-after-free somewhere, which is the
+  # thing this tool exists to find.
+  #
+  # ASan's runtime has to be loaded before anything it instruments, and
+  # the addon is opened by `require` long after node has started, so it
+  # is preloaded rather than linked: `-Zexternal-clangrt` tells rustc
+  # not to bundle its own copy, and LD_PRELOAD supplies clang's. The
+  # path is asked for rather than written down, because it moves with
+  # the LLVM version the image ships. Leak detection is off here and
+  # the job below is where it lives, since ASan and LSan report the
+  # same run twice and a report that arrives in two jobs is a report
+  # nobody can attribute.
+  sanitizer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - uses: Swatinem/rust-cache@v2
+      # The instrumented build is nightly, because `-Zsanitizer` is,
+      # and it is the only thing here that is: what ships is built by
+      # the pinned compiler in every other job.
+      - run: rustup toolchain install nightly --profile minimal
+      - run: sudo apt-get update && sudo apt-get install -y libclang-rt-18-dev
+      - run: npm ci
+      - name: The addon, instrumented
+        env:
+          RUSTUP_TOOLCHAIN: nightly
+          RUSTFLAGS: -Zsanitizer=address -Zexternal-clangrt
+          CC: clang
+          CXX: clang++
+        run: npm run build:debug
+      - name: The suite, watched
+        run: |
+          runtime=$(clang -print-file-name=libclang_rt.asan-$(uname -m).so)
+          test -f "$runtime"
+          LD_PRELOAD="$runtime" ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 \
+            npm test
+
+  # The third tool over the same suite, and the one that watches what
+  # the sanitizer cannot. ASan instruments the source it compiles, so
+  # it sees nothing node itself does with the memory it hands the
+  # addon; Valgrind instruments the instructions that run, so both
+  # sides of the boundary are watched and so is every prebuilt thing
+  # either of them links. It also reports a read of memory nobody
+  # wrote, which ASan does not look for at all.
+  #
+  # Definite leaks only, and for the reason a Rust process always gives:
+  # one-time allocations held at exit are still reachable and not lost,
+  # and counting those would fire this gate on every run and teach
+  # everyone to ignore it. --error-exitcode is what makes a report a
+  # failure rather than something in a log nobody opens.
+  #
+  # No suppressions. There is nothing to suppress, which is worth saying
+  # out loud: the day this needs a suppression file is the day somebody
+  # should read what it wants suppressed before writing it down.
+  leaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y valgrind
+      - run: npm ci
+      # An ordinary build. Valgrind wants the instructions the addon
+      # actually ships, and an instrumented one would be a different
+      # program with a different allocator underneath it.
+      - run: npm run build:debug
+      - run: |
+          valgrind --error-exitcode=1 --leak-check=full \
+            --errors-for-leak-kinds=definite -q \
+            node --test "test/*.test.mjs"
+
   # Bun and Deno run the same suite over the same binary, because the
   # binary is the same one: N-API is the ABI all three implement, and a
   # runtime this package claims and nothing runs on is a runtime this
