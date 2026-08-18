@@ -32,6 +32,7 @@ use zudb::query::Value;
 use zudb::zu1::catalog::Catalog;
 
 use crate::error::usage;
+use crate::temporal;
 
 /// How an INT64 is spelled on the way out.
 ///
@@ -68,21 +69,38 @@ impl Ints {
     }
 }
 
+/// How a statement spells the values it gives back.
+///
+/// Two decisions, both made where the connection is opened and one of
+/// them changeable per statement. They travel together because they
+/// travel the same way: from the call, through the task, to the thread
+/// the statement runs on, and back to the row that is being built.
+#[derive(Clone, Copy, Default)]
+pub struct Spelling {
+    /// How an INT64 comes back.
+    pub ints: Ints,
+    /// Whether a temporal value comes back as a `Temporal` one rather
+    /// than as one of this client's four classes. Off unless the
+    /// connection asked for it, and asking on a runtime without
+    /// `Temporal` fails at the connect rather than at the first row.
+    pub temporal: bool,
+}
+
 /// What a result needs on the way out.
 ///
 /// The table names are the statement's, and so is the spelling of its
-/// integers, so both are settled once where the connection is held and
+/// values, so both are settled once where the connection is held and
 /// then read by every value of every row.
 pub struct Shape {
     names: Names,
-    ints: Ints,
+    spelling: Spelling,
 }
 
 impl Shape {
-    pub fn of(catalog: &Catalog, ints: Ints) -> Shape {
+    pub fn of(catalog: &Catalog, spelling: Spelling) -> Shape {
         Shape {
             names: Names::of(catalog),
-            ints,
+            spelling,
         }
     }
 }
@@ -254,6 +272,21 @@ impl ZuDate {
         ZuDate { days }
     }
 
+    /// The same day as a `Temporal.PlainDate`.
+    ///
+    /// For the program that wants one value converted rather than all of
+    /// them, which is the common one: a result is read for its ids and
+    /// its names and then formats the one date it is going to show. A
+    /// connection opened with `{ temporal: true }` does this to every
+    /// temporal value it gives back and this method is what it calls.
+    ///
+    /// Throws on a runtime that has no `Temporal`, naming the flag that
+    /// turns it on.
+    #[napi(js_name = "toTemporal", ts_return_type = "ZuPlainDate")]
+    pub fn to_temporal<'env>(&self, env: &'env Env) -> Result<Unknown<'env>> {
+        converted(env, Temporal::Date(self.days))
+    }
+
     /// The same thing as a plain object, for the reason [`ZuNode::to_json`]
     /// gives.
     #[napi(js_name = "toJSON")]
@@ -290,6 +323,25 @@ impl ZuTime {
     #[napi(getter)]
     pub fn nanos(&self) -> BigInt {
         BigInt::from(self.nanos)
+    }
+
+    /// The same time as a `Temporal.PlainTime`.
+    ///
+    /// A local time only. A time with an offset has no `Temporal` type
+    /// at all, so one throws here rather than losing the offset, and the
+    /// message says why.
+    #[napi(js_name = "toTemporal", ts_return_type = "ZuPlainTime")]
+    pub fn to_temporal<'env>(&self, env: &'env Env) -> Result<Unknown<'env>> {
+        match self.offset {
+            Some(offset) => converted(
+                env,
+                Temporal::ZonedTime {
+                    nanos: self.nanos,
+                    offset: offset as i16,
+                },
+            ),
+            None => converted(env, Temporal::LocalTime(self.nanos)),
+        }
     }
 
     /// The same thing as a plain object, for the reason [`ZuNode::to_json`]
@@ -329,6 +381,30 @@ impl ZuTimestamp {
     #[napi(getter)]
     pub fn nanos(&self) -> BigInt {
         BigInt::from(self.nanos)
+    }
+
+    /// The same instant as a `Temporal.PlainDateTime` for a local one
+    /// and a `Temporal.ZonedDateTime` for a zoned one.
+    ///
+    /// The zone of a zoned one is the offset it was written at, spelled
+    /// `+02:00`, because that is what the engine stores. A named zone is
+    /// a rule that changes under a stored value when the zone database
+    /// is updated, so no value here has ever had one.
+    #[napi(
+        js_name = "toTemporal",
+        ts_return_type = "ZuPlainDateTime | ZuZonedDateTime"
+    )]
+    pub fn to_temporal<'env>(&self, env: &'env Env) -> Result<Unknown<'env>> {
+        match self.offset {
+            Some(offset) => converted(
+                env,
+                Temporal::ZonedDatetime {
+                    nanos: self.nanos,
+                    offset: offset as i16,
+                },
+            ),
+            None => converted(env, Temporal::LocalDatetime(self.nanos)),
+        }
     }
 
     /// The same thing as a plain object, for the reason [`ZuNode::to_json`]
@@ -388,6 +464,21 @@ impl ZuDuration {
         BigInt::from(self.nanos)
     }
 
+    /// The same length as a `Temporal.Duration`.
+    ///
+    /// A year-month one becomes months and a day-time one becomes
+    /// seconds and nanoseconds, which are the fields that hold what zu
+    /// stores without inventing the rest: `Temporal.Duration` can carry
+    /// months and days at once and no zu duration ever does.
+    #[napi(js_name = "toTemporal", ts_return_type = "ZuTemporalDuration")]
+    pub fn to_temporal<'env>(&self, env: &'env Env) -> Result<Unknown<'env>> {
+        let kind = match self.kind {
+            "yearMonth" => Temporal::Duration(DurationKind::YearMonth, self.months),
+            _ => Temporal::Duration(DurationKind::DayTime, self.nanos),
+        };
+        converted(env, kind)
+    }
+
     /// The same thing as a plain object, for the reason [`ZuNode::to_json`]
     /// gives.
     #[napi(js_name = "toJSON")]
@@ -397,6 +488,27 @@ impl ZuDuration {
         object.set("months", BigInt::from(self.months))?;
         object.set("nanos", BigInt::from(self.nanos))?;
         Ok(object)
+    }
+}
+
+/// What `toTemporal()` gives back, which is the `Temporal` value or the
+/// reason there is not one.
+///
+/// The reason is a `ZuUsageError` rather than a plain throw, because it
+/// is the same kind of thing every other refusal in this client is: the
+/// caller asked for something the value cannot be, and the answer names
+/// the value rather than the line it happened on.
+fn converted(env: &Env, value: Temporal) -> Result<Unknown<'_>> {
+    // A runtime without `Temporal` at all, which the connect option
+    // catches before a statement runs and this method cannot: it is
+    // called on a value that already exists, so the first it hears of
+    // the runtime is now.
+    if !temporal::present(env)? {
+        return Err(usage(env, temporal::MISSING));
+    }
+    match temporal::to_temporal(env, value)? {
+        Some(made) => Ok(made),
+        None => Err(usage(env, temporal::NO_ZONED_TIME)),
     }
 }
 
@@ -432,7 +544,7 @@ pub fn to_js<'env>(
     match value {
         Value::Null => Null.into_unknown(env),
         Value::Bool(b) => (*b).into_unknown(env),
-        Value::Int(n) => int(env, column, *n, shape.ints),
+        Value::Int(n) => int(env, column, *n, shape.spelling.ints),
         Value::Float(f) => (*f).into_unknown(env),
         Value::Str(s) => s.as_str().into_unknown(env),
         Value::Node { table, offset } => node(*table, *offset, &shape.names)
@@ -460,7 +572,7 @@ pub fn to_js<'env>(
             }
             object.into_unknown(env)
         }
-        Value::Temporal(t) => temporal(env, *t),
+        Value::Temporal(t) => moment(env, *t, shape.spelling.temporal),
         Value::Path(walk) => path(env, walk, &shape.names),
         // The three the executor keeps to itself. A chain is settled
         // into an edge list before any value leaves the pipeline, and a
@@ -555,7 +667,24 @@ fn path<'env>(env: &'env Env, walk: &[Value], names: &Names) -> Result<Unknown<'
     object.into_unknown(env)
 }
 
-fn temporal(env: &Env, value: Temporal) -> Result<Unknown<'_>> {
+/// A temporal value, spelled the way this statement was asked to spell
+/// them.
+///
+/// A connection that asked for `Temporal` gets it for every value that
+/// has a `Temporal` type, and the one that does not, which is a time
+/// with an offset, keeps its class. That is a mode with a hole in it and
+/// the hole is the standard's: `PlainTime` is local and `ZonedDateTime`
+/// carries a date, so the alternatives are dropping the offset or
+/// inventing a day, and a class the caller already knows how to read is
+/// better than either.
+fn moment(env: &Env, value: Temporal, wanted: bool) -> Result<Unknown<'_>> {
+    if wanted && let Some(made) = temporal::to_temporal(env, value)? {
+        return Ok(made);
+    }
+    as_class(env, value)
+}
+
+fn as_class(env: &Env, value: Temporal) -> Result<Unknown<'_>> {
     match value {
         Temporal::Date(days) => ZuDate { days }.into_instance(env)?.into_unknown(env),
         Temporal::LocalTime(nanos) => ZuTime {
@@ -653,6 +782,13 @@ fn from_object(env: &Env, name: &str, value: Unknown<'_>) -> Result<Value> {
             items.push(from_js(env, name, item)?);
         }
         return Ok(Value::List(items));
+    }
+    // After the array and before the record, because a `Temporal` value
+    // has no own enumerable properties at all: read as a record it
+    // would bind as `{}` and compare against nothing, which is the one
+    // outcome worse than a refusal.
+    if let Some(moment) = temporal::from_temporal(env, name, &value)? {
+        return Ok(Value::Temporal(moment));
     }
     // A plain object is a record, which is the one mapping that reads
     // the same in both directions: a record comes back as an object

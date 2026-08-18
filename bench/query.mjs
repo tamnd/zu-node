@@ -12,6 +12,10 @@
 // thing.
 //
 //   npm run build && npm run bench
+//
+// One case needs `Temporal` and is left out on a runtime without it, so
+// `npm run bench:temporal` is the same run on Node 24, where `Temporal`
+// is behind `--harmony-temporal`.
 
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -31,13 +35,25 @@ const conn = await connect(join(dir, 'bench.zu1'))
 
 // The declaring insert is written with literals, because that is what
 // tells the engine what each column holds.
-await conn.exec("INSERT (p:person {id: 0, name: 'n0'})")
+await conn.exec("INSERT (p:person {id: 0, name: 'n0', on: DATE '2024-01-01'})")
 for (let start = 1; start < ROWS; start += BATCH) {
   const end = Math.min(start + BATCH, ROWS)
   const parts = []
-  for (let ix = start; ix < end; ix++) parts.push(`(p${ix}:person {id: ${ix}, name: 'n${ix}'})`)
+  for (let ix = start; ix < end; ix++) {
+    parts.push(`(p${ix}:person {id: ${ix}, name: 'n${ix}', on: DATE '2024-01-01'})`)
+  }
   await conn.exec(`INSERT ${parts.join(', ')}`)
 }
+
+// The same rows read by a connection in temporal mode, which is a
+// second connection because the mode is settled when one is opened. A
+// runtime without `Temporal` refuses that connection, which is the
+// whole point of refusing it there, so the case is left out rather than
+// measured as a failure.
+const temporal =
+  typeof globalThis.Temporal === 'undefined'
+    ? null
+    : await connect(join(dir, 'bench.zu1'), { temporal: true })
 
 /// The fastest of `REPEATS` runs, in milliseconds, after one warmup.
 ///
@@ -83,6 +99,26 @@ const cases = [
     run: () =>
       conn.query('MATCH (p:person) RETURN p.id AS id', null, { bigIntMode: 'number' }),
   },
+  {
+    // A DATE as the class this client registers, which is one object
+    // holding one integer. The number to read the next one against.
+    name: 'scan, one DATE column',
+    per: 'row',
+    run: () => conn.query('MATCH (p:person) RETURN p.on AS on'),
+  },
+  ...(temporal
+    ? [
+        {
+          // The same column as a `Temporal.PlainDate`, which is the
+          // three property reads that find the constructor, the civil
+          // calendar arithmetic that turns a day count into a date, and
+          // whatever the runtime's own class costs to construct.
+          name: 'scan, one DATE as Temporal',
+          per: 'row',
+          run: () => temporal.query('MATCH (p:person) RETURN p.on AS on'),
+        },
+      ]
+    : []),
   {
     name: 'scan, whole nodes',
     per: 'row',
@@ -163,5 +199,6 @@ for (const { name, per, run } of cases) {
   )
 }
 
+temporal?.close()
 conn.close()
 await rm(dir, { recursive: true, force: true })

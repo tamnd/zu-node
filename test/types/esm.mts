@@ -9,9 +9,11 @@ import {
   type ZuBatch,
   type ZuBigIntMode,
   type ZuError,
+  type ZuPlainDate,
   type ZuRows,
   type ZuStream,
   type ZuSummary,
+  type ZuValue,
 } from 'zudb'
 
 export async function people(path: string, name: string): Promise<string[]> {
@@ -100,4 +102,31 @@ export function retryable(caught: unknown): boolean {
 
 export function epoch(): ZuDate {
   return new ZuDate(0)
+}
+
+export async function days(path: string): Promise<unknown[]> {
+  // The temporal mode is on the connection and only there, which is
+  // what the options type says: a statement naming it does not compile.
+  await using conn = await connect(path, { temporal: true })
+  const rows = await conn.query<{ on: ZuValue }>('MATCH (d:day) RETURN d.on AS on')
+  return rows.map((row) => row.on)
+}
+
+export function converted(): ZuPlainDate {
+  // The real `Temporal.PlainDate` on a program whose `lib` declares one
+  // and `unknown` on a program whose `lib` does not, and it compiles
+  // either way, which is the whole reason the type is written as a
+  // question about `globalThis` rather than as an import.
+  return new ZuDate(0).toTemporal()
+}
+
+export function width(value: ZuValue): number {
+  // A value out of a result still narrows on a program with no
+  // `Temporal` types, which is what the empty fallback is for: a member
+  // that fell back to `unknown` instead would swallow the union and
+  // this function would stop compiling for everybody.
+  if (typeof value === 'string') return value.length
+  if (typeof value === 'bigint') return value.toString().length
+  if (Array.isArray(value)) return value.length
+  return 0
 }

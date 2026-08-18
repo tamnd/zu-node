@@ -35,7 +35,7 @@ The rows are an array, so iterating them is `for (const row of rows)` and nothin
 
 ## What works today
 
-`connect`, `query`, `exec`, `stream`, `close`, `dispose` and `await using`. Named parameters both ways, including lists, records and nesting. Every scalar the engine has, plus nodes, edges and paths with their tables named rather than numbered, and `ZuDate`, `ZuTime`, `ZuTimestamp` and `ZuDuration`. Read-only connections, memory and thread limits. `bigIntMode`, per statement or per connection. An `AbortSignal` on any statement. The full error surface above, and `isZuError` to recognize it. Streaming, as an async iterable, as batches and as a Web Stream. Both module formats, typed separately.
+`connect`, `query`, `exec`, `stream`, `close`, `dispose` and `await using`. Named parameters both ways, including lists, records and nesting. Every scalar the engine has, plus nodes, edges and paths with their tables named rather than numbered, and `ZuDate`, `ZuTime`, `ZuTimestamp` and `ZuDuration`, with `{ temporal: true }` and `toTemporal()` for the runtimes that have `Temporal`. Read-only connections, memory and thread limits. `bigIntMode`, per statement or per connection. An `AbortSignal` on any statement. The full error surface above, and `isZuError` to recognize it. Streaming, as an async iterable, as batches and as a Web Stream. Both module formats, typed separately.
 
 Build it with `npm run build`, and run the suite with `npm test`. Nothing is published yet, so `npm i zudb` is not a thing you can type at anybody's terminal, but everything it will do is built and installed on every run of the release workflow.
 
@@ -94,6 +94,44 @@ What is traded for that is worth stating plainly, because it is the reason this 
 
 The mode reaches the INT64 columns of a result and nothing else. A node's `offset`, an edge's `src`, `dst` and `ord`, and the nanosecond counts on the temporal classes stay `bigint` in both modes, because they are properties of classes the addon registers once rather than values a statement can respell.
 
+## Dates and times, as classes or as Temporal
+
+A date, a time, a timestamp and a duration come back as `ZuDate`, `ZuTime`, `ZuTimestamp` and `ZuDuration`, which hold exactly what the engine holds: a count of days from 1970-01-01, a count of nanoseconds from midnight, a count of nanoseconds from the epoch, and a count of months or nanoseconds. That is exact and it is portable and it is no help at all to a program that wants to know what day of the week it was.
+
+`Temporal` is the standard answer to that, so a connection can ask for it:
+
+```ts
+await using conn = await connect("social.zu1", { temporal: true });
+const rows = await conn.query<{ on: Temporal.PlainDate }>(`MATCH (d:day) RETURN d.on AS on`);
+rows[0].on.dayOfWeek; // 1, which no count of days was ever going to tell you
+```
+
+| zu | as a class | with `{ temporal: true }` |
+|---|---|---|
+| DATE | `ZuDate` | `Temporal.PlainDate` |
+| TIME without an offset | `ZuTime` | `Temporal.PlainTime` |
+| TIME with an offset | `ZuTime` | `ZuTime`, which is the exception below |
+| TIMESTAMP without an offset | `ZuTimestamp` | `Temporal.PlainDateTime` |
+| TIMESTAMP with an offset | `ZuTimestamp` | `Temporal.ZonedDateTime` |
+| DURATION | `ZuDuration` | `Temporal.Duration` |
+
+The exception is the one value zu holds that `Temporal` has no type for. A time carrying an offset is neither a `PlainTime`, which is local and would drop the offset, nor a `ZonedDateTime`, which carries a date nobody wrote, so it stays a `ZuTime` in temporal mode rather than being converted into something it is not. Everything else in the same row still arrives converted.
+
+The option is settled when the connection is opened and cannot be named per statement, unlike `bigIntMode`. Both spellings are exact and neither loses anything, so which one a program wants is a property of the program and not of the query, and a result whose classes changed halfway through a codebase is a result nobody can write a function against. A program that wants one value converted rather than all of them calls `toTemporal()`, which is on all four classes and needs no option anywhere:
+
+```ts
+const rows = await conn.query<{ on: ZuDate }>(`MATCH (d:day) RETURN d.on AS on`);
+const plain = rows[0].on.toTemporal(); // Temporal.PlainDate
+```
+
+Going the other way needs no opt-in at all. A `Temporal` value passed as a parameter binds as the zu value it is, on every connection, whether or not that connection asked for `Temporal` on the way out, because recognizing one costs a property read and refusing one would be a rule nobody could guess. `PlainDate`, `PlainTime`, `PlainDateTime`, `ZonedDateTime`, `Instant` and `Duration` all bind. A `PlainYearMonth`, a `PlainMonthDay` or a value on a calendar that is not `iso8601` is refused by name, since zu holds neither, and so is a `Duration` counting both months and days, because no number of days is a month and a value holding both would have to invent an answer for one month after 31 January.
+
+What it costs is the constructor and the calendar arithmetic. On 50k rows here a DATE column costs about 560ns a row as a `ZuDate` and about 650ns as a `Temporal.PlainDate`, against 240ns for the INT64 column beside it, so the conversion is worth about a sixth of a value that was already the most expensive kind to build. Nothing is cached between rows, because a `Temporal` value is a JavaScript object and the constructors are properties of one, and neither can be held by a struct that crosses to the threadpool thread the statement runs on.
+
+`Temporal` reached Stage 4 in March 2026 and is unflagged in Node 26 and the current browsers. Node 24, which is still the active LTS, has it behind `--harmony-temporal`. Asking a runtime without it for `{ temporal: true }` is refused at the connect and before the database file is opened, so a program that asked for something its runtime cannot do fails at the line that asked and leaves nothing behind. `toTemporal()` on such a runtime is refused the same way. That is the whole reason this is an opt-in rather than the default: a client that returned `Temporal` values everywhere would be a client half its users cannot load.
+
+In TypeScript the types are named `ZuPlainDate`, `ZuPlainTime`, `ZuPlainDateTime`, `ZuZonedDateTime` and `ZuTemporalDuration`, and each is the real `Temporal` type on a program whose `lib` declares one and `unknown` on a program whose `lib` does not. Which `lib` has `Temporal` is different in every version of TypeScript that has shipped since Stage 4, and a package that hard-coded an answer would either fail to compile for half its users or promise a type their compiler has never heard of.
+
 ## Importing it, either way
 
 ```ts
@@ -126,7 +164,7 @@ Anything outside that table has no binary and no source build to fall back on, s
 
 ## Still to come
 
-`toTemporal()` and `{ temporal: true }`, for the runtimes where Temporal is unflagged: it reached Stage 4 in March 2026 and is unflagged in Node 26, but Node 24 is still the active LTS and Safari is still behind a flag, which is why the stable types are the four classes above. Bun and Deno in CI, and the WASM build for the browser.
+Bun and Deno in CI, and the WASM build for the browser.
 
 ## Runtimes
 
