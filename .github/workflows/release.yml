@@ -143,15 +143,23 @@ jobs:
       # no target flag: inside the image the default target is the musl
       # one. The crt-static override is what makes a shared object
       # possible at all on musl, whose default is to link the C runtime
-      # statically into everything. The linker is named because Rust's
-      # aarch64 musl target asks for aarch64-linux-musl-gcc, which is
-      # what a cross toolchain calls its compiler and not what a machine
-      # compiling for itself has: on Alpine the compiler is gcc.
+      # statically into everything.
+      #
+      # The linker is named per target rather than in RUSTFLAGS, because
+      # napi passes --target and cargo stops applying RUSTFLAGS to host
+      # artifacts as soon as it sees one. The host artifacts here are the
+      # build scripts of proc macro crates, which is exactly where the
+      # arm64 row was failing: Rust's aarch64 musl target asks for
+      # aarch64-linux-musl-gcc, which is what a cross toolchain calls its
+      # compiler and not what a machine compiling for itself has. On
+      # Alpine the compiler is gcc, for both rows.
       - name: Build, inside Alpine
         if: matrix.alpine != ''
         run: |
           docker run --rm -v "$PWD":/work -w /work \
-            -e RUSTFLAGS="-C target-feature=-crt-static -C linker=gcc" \
+            -e RUSTFLAGS="-C target-feature=-crt-static" \
+            -e CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=gcc \
+            -e CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=gcc \
             ${{ matrix.alpine }} sh -c '
               set -eu
               apk add --no-cache nodejs npm rustup build-base
