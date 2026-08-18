@@ -16,7 +16,7 @@
 //! narrows the `unknown` a `catch` gives you.
 
 use napi::bindgen_prelude::*;
-use napi::{Env, Status};
+use napi::{Env, Status, ValueType};
 use zudb::ZuError;
 
 /// Builds the exception for `err` and wraps it as the failure to
@@ -41,8 +41,7 @@ pub fn raise(env: &Env, err: ZuError) -> Error {
 }
 
 fn build<'env>(env: &'env Env, err: &ZuError) -> Result<Object<'env>> {
-    let mut object = blank(env, &err.to_string())?;
-    object.set("name", name_for(err))?;
+    let mut object = blank(env, name_for(err), &err.to_string())?;
     object.set("retryable", err.retryable())?;
     if let Some(status) = err.gqlstatus() {
         object.set("code", status.code())?;
@@ -122,8 +121,7 @@ pub fn usage(env: &Env, message: impl AsRef<str>) -> Error {
 }
 
 fn usage_object<'env>(env: &'env Env, message: &str) -> Result<Object<'env>> {
-    let mut object = blank(env, message)?;
-    object.set("name", "ZuUsageError")?;
+    let mut object = blank(env, "ZuUsageError", message)?;
     object.set("retryable", false)?;
     Ok(object)
 }
@@ -142,21 +140,50 @@ pub fn aborted(env: &Env, message: &str) -> Error {
 }
 
 fn aborted_object<'env>(env: &'env Env, message: &str) -> Result<Object<'env>> {
-    let mut object = blank(env, message)?;
-    object.set("name", "AbortError")?;
+    let mut object = blank(env, "AbortError", message)?;
     object.set("retryable", false)?;
     Ok(object)
 }
 
-/// An `Error` with `message` and nothing else on it yet.
+/// An `Error` with a name, a message, a stack and nothing else on it yet.
 ///
 /// napi writes the status it was handed into `code`, and `code` here is
 /// the GQLSTATUS. A caller reading `err.code === '42001'` cannot be
 /// given `GenericFailure` for a condition that has no code of its own,
 /// so the one napi wrote is removed and the real one, when there is
 /// one, is written in its place.
-fn blank<'env>(env: &'env Env, message: &str) -> Result<Object<'env>> {
+fn blank<'env>(env: &'env Env, name: &str, message: &str) -> Result<Object<'env>> {
     let mut object = env.create_error(Error::new(Status::GenericFailure, message.to_string()))?;
     object.delete_named_property("code")?;
+    object.set("name", name)?;
+    stacked(env, &mut object, name, message)?;
     Ok(object)
+}
+
+/// Gives the error a `stack` on a runtime that gave it none.
+///
+/// V8 writes one when the error is made, and for one made under a
+/// statement it is the header line and nothing else, since there are no
+/// JavaScript frames beneath a native call that is already running.
+/// JavaScriptCore writes no `stack` at all through napi, so on Bun
+/// `err.stack` is `undefined` and every logger that reaches for it
+/// prints that word instead of the failure. The header line is what the
+/// other runtimes have and it is what this writes, after the name, so
+/// the first line says `ZuSyntaxError` on all four of them. An error
+/// that arrived with a stack keeps the one it has, frames and all.
+fn stacked(env: &Env, object: &mut Object<'_>, name: &str, message: &str) -> Result<()> {
+    let existing: Unknown = object.get_named_property_unchecked("stack")?;
+    if existing.get_type()? == ValueType::String {
+        return Ok(());
+    }
+    // Defined rather than assigned, because the one V8 writes is not
+    // enumerable and this one has to match: a plain assignment puts
+    // `stack` in `Object.keys(err)`, and then every structured logger
+    // that walks an error's own keys prints the trace as a field on one
+    // runtime and not on the other three.
+    let property = Property::new()
+        .with_utf8_name("stack")?
+        .with_napi_value(env, format!("{name}: {message}"))?
+        .with_property_attributes(PropertyAttributes::Writable | PropertyAttributes::Configurable);
+    object.define_properties(&[property])
 }
