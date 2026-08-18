@@ -17,7 +17,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { connect } from '../index.js'
+import { connect } from 'zudb'
 
 const ROWS = Number(process.env.ZU_BENCH_ROWS ?? 50_000)
 const REPEATS = Number(process.env.ZU_BENCH_REPEATS ?? 9)

@@ -30,12 +30,12 @@ The rows are an array, so iterating them is `for (const row of rows)` and nothin
 - **INT64 is `bigint`.** Always, by default. A JavaScript number stops being exact at 2^53 and zu's integers go to 2^63, so a count that came back as a number would be a count you cannot trust. `{ bigIntMode: "number" }` is planned, will be documented with its precision hazard, and will never be the default.
 - **Nothing blocks the event loop.** Every native call runs on libuv's threadpool and hands back a promise before the statement has started. There is no synchronous variant, and the ones that arrive later will say in their own documentation that they belong in scripts, not servers.
 - **`await using` is the intended scoping.** A connection is `Symbol.asyncDispose`, and `close()` stays public for callers who cannot use the syntax.
-- **A failure is an ordinary `Error`.** Every `catch`, logger and rejection handler already knows what to do with one. What makes it a zu error is the fields, and none of them has to be parsed back out of the message: `code` is the GQLSTATUS and picks the branch, `condition` is the standard's own words for it, `line` and `column` and `excerpt` underline the token, and `retryable` decides whether a retry loop goes round again. A mistake this client caught before the engine saw it carries no `code` and is named `ZuUsageError`, so a caller mapping codes to branches can tell a missing code from one it does not recognize.
+- **A failure is an ordinary `Error`.** Every `catch`, logger and rejection handler already knows what to do with one. What makes it a zu error is the fields, and none of them has to be parsed back out of the message: `code` is the GQLSTATUS and picks the branch, `condition` is the standard's own words for it, `line` and `column` and `excerpt` underline the token, and `retryable` decides whether a retry loop goes round again. A mistake this client caught before the engine saw it carries no `code` and is named `ZuUsageError`, so a caller mapping codes to branches can tell a missing code from one it does not recognize. `isZuError(caught)` is the exported guard for the `catch` clause, where the value is `unknown` and could be anything at all, and in TypeScript it narrows to the full shape.
 - **A refusal is a rejection.** A closed connection and a parameter of a type nothing can bind are refused inside the promise rather than thrown out of the call, so one `await` catches everything one statement can do.
 
 ## What works today
 
-`connect`, `query`, `exec`, `close`, `dispose` and `await using`. Named parameters both ways, including lists, records and nesting. Every scalar the engine has, plus nodes, edges and paths with their tables named rather than numbered, and `ZuDate`, `ZuTime`, `ZuTimestamp` and `ZuDuration`. Read-only connections, memory and thread limits. An `AbortSignal` on any statement. The full error surface above.
+`connect`, `query`, `exec`, `close`, `dispose` and `await using`. Named parameters both ways, including lists, records and nesting. Every scalar the engine has, plus nodes, edges and paths with their tables named rather than numbered, and `ZuDate`, `ZuTime`, `ZuTimestamp` and `ZuDuration`. Read-only connections, memory and thread limits. An `AbortSignal` on any statement. The full error surface above, and `isZuError` to recognize it. Both module formats, typed separately.
 
 Build it with `npm run build`, and run the suite with `npm test`. Nothing is published yet, so `npm i zudb` is not a thing you can type at anybody's terminal, but everything it will do is built and installed on every run of the release workflow.
 
@@ -50,6 +50,17 @@ const rows = await conn.query(statement, params, { signal: AbortSignal.timeout(5
 It is the signal JavaScript already has, so a timeout written like the one above, the signal a framework hands a request handler, and an `AbortSignal.any([...])` composed out of both all work here without anything being adapted. When it fires, the engine's interrupt is raised, the executor notices it at a boundary it was already stopping at, and the statement ends inside a vector of rows rather than at the end of the scan. The connection is left exactly as it was, so the statement after a stopped one runs normally.
 
 What the promise rejects with is the signal's own reason, which is what `fetch` does: `AbortSignal.timeout(50)` rejects with the runtime's `TimeoutError`, `controller.abort(new RequestGone())` rejects with the `RequestGone` you made, and a bare `controller.abort()` rejects with the runtime's `AbortError`. A signal that has already fired stops the statement before the engine sees it at all. A signal that never fires costs one listener, taken off again when the statement ends, whether it answered, failed or was stopped.
+
+## Importing it, either way
+
+```ts
+import { connect } from "zudb";      // ESM, and TypeScript resolving through the import condition
+const { connect } = require("zudb"); // CommonJS, the same names and the same objects
+```
+
+Both formats reach one loaded addon, so a `ZuDate` made through `import` is an instance of the `ZuDate` reached through `require`, and a program that mixes the two, which is most programs with a dependency tree, is not quietly holding two of everything. There is no default export in either format, because a default alongside the named exports is a second spelling of every name whose meaning depends on the caller's bundler and their `esModuleInterop`.
+
+The declarations are separate files rather than one shared `.d.ts`, since a resolver reads `.d.cts` for `require` and `.d.mts` for `import`, and `types` is the first condition in each entry: conditions match in the order they are written, so `types` after `default` is a `types` nothing reaches, and a package that compiles here would be `any` everywhere else. `npm run check:types` compiles a program in each format against the published shape, and `npm run check:package` runs [`attw`](https://github.com/arethetypeswrong/arethetypeswrong.github.io) over a real `npm pack` for node10, node16 CJS, node16 ESM and bundler resolution.
 
 ## Installing, once there is something to install
 
@@ -72,7 +83,7 @@ Anything outside that table has no binary and no source build to fall back on, s
 
 ## Still to come
 
-`AsyncIterable` and Web Streams over a result. `bigIntMode`. `toTemporal()` and `{ temporal: true }`, for the runtimes where Temporal is unflagged: it reached Stage 4 in March 2026 and is unflagged in Node 26, but Node 24 is still the active LTS and Safari is still behind a flag, which is why the stable types are the four classes above. Dual ESM and CJS, with types first in every export condition. Bun and Deno in CI, and the WASM build for the browser.
+`AsyncIterable` and Web Streams over a result. `bigIntMode`. `toTemporal()` and `{ temporal: true }`, for the runtimes where Temporal is unflagged: it reached Stage 4 in March 2026 and is unflagged in Node 26, but Node 24 is still the active LTS and Safari is still behind a flag, which is why the stable types are the four classes above. Bun and Deno in CI, and the WASM build for the browser.
 
 ## Runtimes
 

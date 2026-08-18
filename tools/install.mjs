@@ -57,18 +57,39 @@ try {
     join(app, 'run.mjs'),
     [
       "import assert from 'node:assert/strict'",
-      "import { connect } from 'zudb'",
+      "import { connect, isZuError } from 'zudb'",
       "const conn = await connect(':memory:')",
       'await conn.exec("INSERT (:person {id: 1, name: \'ada\'})")',
       "const rows = await conn.query('MATCH (p:person) RETURN p.name AS name')",
       "assert.deepEqual(rows.columns, ['name'])",
       "assert.equal(rows[0].name, 'ada')",
+      "assert.equal(isZuError(await conn.query('MATCH (').catch((err) => err)), true)",
       'await conn.close()',
     ].join('\n'),
   )
   execFileSync(process.execPath, [join(app, 'run.mjs')], { cwd: app, stdio: 'inherit' })
 
-  console.log(`installed zudb and zudb-${platform.dir} into an empty project, and it ran a statement`)
+  // The other half of the package, resolved through the other condition.
+  // The two formats reach the same loaded module, so a value made by one
+  // is an instance of the class the other exports, and a program that
+  // mixes them is not quietly holding two of everything.
+  await writeFile(
+    join(app, 'run.cjs'),
+    [
+      "const assert = require('node:assert/strict')",
+      "const required = require('zudb')",
+      "import('zudb').then(async (imported) => {",
+      '  assert.equal(required.ZuDate, imported.ZuDate)',
+      "  const conn = await required.connect(':memory:')",
+      "  const rows = await conn.query('RETURN 1 AS n')",
+      '  assert.equal(rows[0].n, 1n)',
+      '  await conn.close()',
+      '})',
+    ].join('\n'),
+  )
+  execFileSync(process.execPath, [join(app, 'run.cjs')], { cwd: app, stdio: 'inherit' })
+
+  console.log(`installed zudb and zudb-${platform.dir} into an empty project, and it ran a statement from both formats`)
 } finally {
   await rm(where, { recursive: true, force: true })
 }

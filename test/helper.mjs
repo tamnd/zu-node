@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { connect } from '../index.js'
+import { connect, isZuError as guard } from 'zudb'
 
 // A database of its own per test, in a directory of its own, removed
 // when the test ends. Sharing one would make the order the tests run in
@@ -27,7 +27,9 @@ export async function twoPeople(t) {
 }
 
 // What a test asserts about an error it caught, in one place, since
-// every one of them wants the same first two things.
+// every one of them wants the same first two things. The guard the
+// package exports is what says it is a zu failure at all, so the tests
+// exercise the same predicate a caller would write.
 export function isZuError(err, name) {
-  return err instanceof Error && err.name === name && typeof err.retryable === 'boolean'
+  return guard(err) && err.name === name
 }

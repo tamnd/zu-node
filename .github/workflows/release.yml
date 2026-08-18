@@ -131,13 +131,18 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      # napi rather than npm run build, because only this workflow builds
+      # for a target that is not the machine's own. The two file names
+      # are the ones package.json ships, and a build that leaves them
+      # under napi's defaults is a published package whose loader is not
+      # the loader that was built.
       - name: Build
         if: matrix.alpine == ''
         shell: bash
         run: |
           set -eu
           npm ci
-          npx napi build --platform --release --target ${{ matrix.target }}
+          npx napi build --platform --release --target ${{ matrix.target }} --js binding.cjs --dts binding.d.cts
 
       # Alpine builds the row's own architecture natively, so there is
       # no target flag: inside the image the default target is the musl
@@ -166,7 +171,7 @@ jobs:
               rustup-init -y --no-modify-path --profile minimal
               export PATH="$HOME/.cargo/bin:$PATH"
               npm ci
-              npx napi build --platform --release
+              npx napi build --platform --release --js binding.cjs --dts binding.d.cts
             '
 
       # One file, named after the platform it runs on, which is what the

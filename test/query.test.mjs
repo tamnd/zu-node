@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { ZuNode } from '../index.js'
+import { ZuNode } from 'zudb'
 import { twoPeople } from './helper.mjs'
 
 test('the rows come back as an array of objects keyed by column', async (t) => {

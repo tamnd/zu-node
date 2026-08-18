@@ -38,7 +38,16 @@ test('installing builds nothing, so no compiler is needed and no script runs', a
   // The root package carries no binary. Every one of them is its own
   // package, so npm downloads exactly the one the machine can run
   // rather than all eight.
-  assert.deepEqual(pkg.files, ['index.js', 'index.d.ts', 'README.md', 'LICENSE'])
+  assert.deepEqual(pkg.files, [
+    'binding.cjs',
+    'binding.d.cts',
+    'zudb.cjs',
+    'zudb.mjs',
+    'zudb.d.cts',
+    'zudb.d.mts',
+    'README.md',
+    'LICENSE',
+  ])
 })
 
 test('every target is built, published and asked for, or none of the three', async () => {
@@ -96,7 +105,7 @@ test('a platform package says which machine it is for and holds one file', async
 })
 
 test('the loader asks for the packages that are published', async () => {
-  const loader = await readFile(new URL('index.js', root), 'utf8')
+  const loader = await readFile(new URL('binding.cjs', root), 'utf8')
 
   // The loader is generated and the packages are generated, from the
   // same list, but not by the same command and not at the same time.

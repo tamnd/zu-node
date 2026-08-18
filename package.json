@@ -18,11 +18,29 @@
   "engines": {
     "node": ">= 24"
   },
-  "main": "index.js",
-  "types": "index.d.ts",
+  "type": "commonjs",
+  "main": "./zudb.cjs",
+  "types": "./zudb.d.cts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./zudb.d.mts",
+        "default": "./zudb.mjs"
+      },
+      "require": {
+        "types": "./zudb.d.cts",
+        "default": "./zudb.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
   "files": [
-    "index.js",
-    "index.d.ts",
+    "binding.cjs",
+    "binding.d.cts",
+    "zudb.cjs",
+    "zudb.mjs",
+    "zudb.d.cts",
+    "zudb.d.mts",
     "README.md",
     "LICENSE"
   ],
@@ -41,12 +59,17 @@
     ]
   },
   "scripts": {
-    "build": "napi build --platform --release",
-    "build:debug": "napi build --platform",
+    "build": "napi build --platform --release --js binding.cjs --dts binding.d.cts",
+    "build:debug": "napi build --platform --js binding.cjs --dts binding.d.cts",
     "test": "node --test \"test/*.test.mjs\"",
+    "check:types": "tsc --noEmit --project test/types/tsconfig.json",
+    "check:package": "attw --pack .",
     "bench": "node bench/query.mjs"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^3.8.6"
+    "@arethetypeswrong/cli": "^0.18.2",
+    "@napi-rs/cli": "^3.8.6",
+    "@types/node": "^26.2.0",
+    "typescript": "^5.9.3"
   }
 }
