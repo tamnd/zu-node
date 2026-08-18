@@ -7,29 +7,43 @@ import { connect } from "zudb";
 
 await using conn = await connect("social.zu1");
 
-await conn.exec(`CREATE NODE TABLE Person(id INT64 PRIMARY KEY, name STRING)`);
-await conn.loadCsv("Person", "people.csv");
+await conn.exec(`INSERT (p:Person {id: 1, name: 'ada'})`);
+await conn.exec(`INSERT (p:Person {id: $id, name: $name})`, { id: 2n, name: "zoe" });
 
-const rows = await conn.query<{ name: string; n: bigint }>(
-  `MATCH (p:Person)-[:Follows]->(f)
-   RETURN p.name AS name, count(*) AS n ORDER BY n DESC LIMIT 5`,
+const rows = await conn.query<{ id: bigint; name: string }>(
+  `MATCH (p:Person) WHERE p.name = $name
+   RETURN p.id AS id, p.name AS name`,
+  { name: "zoe" },
 );
-for (const { name, n } of rows) console.log(name, n);
+for (const { id, name } of rows) console.log(id, name);
+
+rows.columns; // ["id", "name"], in the order they were written
+rows.gqlstatus; // "00000"
 ```
 
-```
-npm i zudb
-```
+The first insert into a table is what declares it, and the engine works out what each column holds from the values it was given, which is why that one is written with literals and every one after it takes parameters.
 
-No `node-gyp`, no postinstall script, no compiler. `optionalDependencies` fetches exactly one prebuilt binary for your platform, and a platform with no prebuild falls back to the WASM build rather than failing the install.
+The rows are an array, so iterating them is `for (const row of rows)` and nothing else. What a wrapper object would have carried rides beside the elements as properties that are not enumerable, which is what lets the same value spread, stringify and compare as the plain array it is.
 
 ## Decisions worth knowing before you start
 
-- **INT64 is `bigint`.** Always, by default. `{ bigIntMode: "number" }` exists and is documented with its precision hazard, and is never the default, because `count(*)` returning a bigint surprises you once and a corrupted id surprises you in production.
-- **Temporal where the runtime has it.** Temporal reached Stage 4 in March 2026 but is unflagged only in Node 26 and recent Chrome, Edge, and Firefox. Node 24 is still the active LTS and Safari is still behind a flag, so the stable public types are `ZuDate`, `ZuTimestamp`, and `ZuDuration`, each with `toTemporal()`. Pass `{ temporal: true }` to get Temporal objects directly, and it throws at connect time on a runtime that lacks it rather than handing you `undefined` three frames later.
-- **Nothing blocks the event loop.** Every native call runs on the threadpool. `Sync` variants exist and their doc comments say they belong in scripts, not servers.
-- **`await using` is the intended scoping.** `close()` stays public for callers who cannot use it.
-- **Web Streams and `AbortSignal`** work the way you expect: `conn.stream(gql)` gives a `ReadableStream` that respects backpressure, and aborting a signal interrupts the query within 50 ms.
+- **INT64 is `bigint`.** Always, by default. A JavaScript number stops being exact at 2^53 and zu's integers go to 2^63, so a count that came back as a number would be a count you cannot trust. `{ bigIntMode: "number" }` is planned, will be documented with its precision hazard, and will never be the default.
+- **Nothing blocks the event loop.** Every native call runs on libuv's threadpool and hands back a promise before the statement has started. There is no synchronous variant, and the ones that arrive later will say in their own documentation that they belong in scripts, not servers.
+- **`await using` is the intended scoping.** A connection is `Symbol.asyncDispose`, and `close()` stays public for callers who cannot use the syntax.
+- **A failure is an ordinary `Error`.** Every `catch`, logger and rejection handler already knows what to do with one. What makes it a zu error is the fields, and none of them has to be parsed back out of the message: `code` is the GQLSTATUS and picks the branch, `condition` is the standard's own words for it, `line` and `column` and `excerpt` underline the token, and `retryable` decides whether a retry loop goes round again. A mistake this client caught before the engine saw it carries no `code` and is named `ZuUsageError`, so a caller mapping codes to branches can tell a missing code from one it does not recognize.
+- **A refusal is a rejection.** A closed connection and a parameter of a type nothing can bind are refused inside the promise rather than thrown out of the call, so one `await` catches everything one statement can do.
+
+## What works today
+
+`connect`, `query`, `exec`, `close`, `dispose` and `await using`. Named parameters both ways, including lists, records and nesting. Every scalar the engine has, plus nodes, edges and paths with their tables named rather than numbered, and `ZuDate`, `ZuTime`, `ZuTimestamp` and `ZuDuration`. Read-only connections, memory and thread limits. The full error surface above.
+
+Build it with `npm run build`, and run the suite with `npm test`. There are no published binaries yet, so `npm i zudb` is not a thing you can type at anybody's terminal.
+
+`npm run bench` measures what this package adds to the engine, which is a row object and one JavaScript value per column: the same scan with the rows dropped is the floor, and the difference between the two is what the boundary costs. Run it against a release build, since a debug build of the engine moves the floor by an order of magnitude and not the rest of it.
+
+## Still to come
+
+Prebuilt binaries under `optionalDependencies`, with no postinstall script and no `node-gyp`. `AsyncIterable` and Web Streams over a result, and `AbortSignal` wired to the engine's interrupt. `bigIntMode`. `toTemporal()` and `{ temporal: true }`, for the runtimes where Temporal is unflagged: it reached Stage 4 in March 2026 and is unflagged in Node 26, but Node 24 is still the active LTS and Safari is still behind a flag, which is why the stable types are the four classes above. Dual ESM and CJS, with types first in every export condition. Bun and Deno in CI, and the WASM build for the browser.
 
 ## Runtimes
 
@@ -37,7 +51,7 @@ No `node-gyp`, no postinstall script, no compiler. `optionalDependencies` fetche
 |---|---|---|
 | Node >= 24 (LTS) | prebuilt N-API binary | CI runs 24 and 26 |
 | Bun >= 1.3 | the same binary | tested as a first-class target, not assumed |
-| Deno >= 2.5 | the same binary via `npm:zudb`, or `jsr:@zu/zudb` | needs `--allow-ffi --allow-read` |
+| Deno >= 2.9 | the same binary via `npm:zudb`, or `jsr:@zu/zudb` | needs `--allow-ffi --allow-read` |
 | Browser and edge | `zudb/wasm` | read-mostly, over OPFS or HTTP range requests |
 | Electron | the same binary | N-API is ABI-stable across Electron versions, so no per-Electron rebuild |
 

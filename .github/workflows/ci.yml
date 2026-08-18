@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+# The compiler is not installed by any step here. rust-toolchain.toml
+# pins the version and names the components, and the rustup every
+# hosted image ships installs both on the first cargo command. A step
+# that installed a toolchain would be a second place the version is
+# written, and the pin exists so there is only one.
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: cargo fmt --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+      # The library target and not --all-targets. This crate is a
+      # cdylib whose whole surface is reached through napi's
+      # registration, which a test harness build does not link, so
+      # every exported item reads as dead code there and the lints
+      # that matter are drowned by six that cannot be true. The tests
+      # are JavaScript, and the job below is what runs them.
+      - run: cargo clippy --all-features -- -D warnings
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        # 24 is the active LTS and the version the package requires. 26
+        # is the current release, and the one where Temporal is
+        # unflagged, so it is where the opt-in of a later milestone will
+        # be exercised. Bun and Deno join this matrix with the line of
+        # DX3 that claims them, since claiming a runtime nothing runs on
+        # is how a client acquires a broken runtime.
+        node: [24, 26]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+      - uses: Swatinem/rust-cache@v2
+      - run: npm ci
+      # Debug, because what this job is asking is whether the binding
+      # is correct rather than how fast it is, and a release build of
+      # the engine is several minutes of LTO per row of the matrix.
+      - run: npm run build:debug
+      - run: npm test
