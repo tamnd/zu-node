@@ -23,9 +23,10 @@ use napi::bindgen_prelude::*;
 use napi::{Env, ScopedTask, ValueType};
 use napi_derive::napi;
 use zudb::query::{QueryResult, Value};
-use zudb::{Config, Database, ZuError};
+use zudb::{Config, Database, Interrupt, ZuError};
 
-use crate::error::{raise, usage};
+use crate::cancel::Watch;
+use crate::error::{aborted, raise, usage};
 use crate::value::{Names, from_js, to_js};
 
 /// What a connection can be opened with.
@@ -65,6 +66,15 @@ pub struct Connection {
     /// rather than inside it, because asking a connection whether it is
     /// closed should not queue behind a ten second statement.
     alive: Arc<AtomicBool>,
+    /// The word a statement running on this connection reads at every
+    /// boundary, taken once when the connection was opened.
+    ///
+    /// Kept here rather than asked of the connection when a statement
+    /// wants one, because asking means taking the lock and the caller
+    /// asking is on the thread that must never wait: the handle belongs
+    /// to the session and is the same one for the connection's whole
+    /// life, so once is enough.
+    interrupt: Interrupt,
     path: String,
     read_only: bool,
 }
@@ -110,6 +120,7 @@ impl<'task> ScopedTask<'task> for ConnectTask {
     fn resolve(&mut self, env: &'task Env, output: Self::Output) -> Result<Self::JsValue> {
         let opened = output.map_err(|err| raise(env, err))?;
         let mut instance = Connection {
+            interrupt: opened.conn.interrupt(),
             inner: Arc::new(Mutex::new(Some(opened.conn))),
             alive: Arc::new(AtomicBool::new(true)),
             path: opened.path,
@@ -199,7 +210,7 @@ impl Connection {
     /// value quietly ignored.
     #[napi(
         ts_generic_types = "Row = Record<string, ZuValue>",
-        ts_args_type = "statement: string, params?: Record<string, ZuParam> | null",
+        ts_args_type = "statement: string, params?: Record<string, ZuParam> | null, options?: ZuStatementOptions | null",
         ts_return_type = "Promise<ZuRows<Row>>"
     )]
     pub fn query(
@@ -207,8 +218,9 @@ impl Connection {
         env: &Env,
         statement: String,
         params: Option<Object<'_>>,
+        options: Option<Object<'_>>,
     ) -> AsyncTask<QueryTask> {
-        AsyncTask::new(self.task(env, statement, params))
+        AsyncTask::new(self.task(env, statement, params, options))
     }
 
     /// Runs one statement for its effect and gives back nothing.
@@ -217,7 +229,7 @@ impl Connection {
     /// which is what a schema statement or a write wants: a result nobody
     /// reads still costs a row object per row on the way out.
     #[napi(
-        ts_args_type = "statement: string, params?: Record<string, ZuParam> | null",
+        ts_args_type = "statement: string, params?: Record<string, ZuParam> | null, options?: ZuStatementOptions | null",
         ts_return_type = "Promise<void>"
     )]
     pub fn exec(
@@ -225,8 +237,9 @@ impl Connection {
         env: &Env,
         statement: String,
         params: Option<Object<'_>>,
+        options: Option<Object<'_>>,
     ) -> AsyncTask<ExecTask> {
-        AsyncTask::new(ExecTask(self.task(env, statement, params)))
+        AsyncTask::new(ExecTask(self.task(env, statement, params, options)))
     }
 
     /// The task one statement runs as, whether or not it is going to
@@ -237,23 +250,32 @@ impl Connection {
     /// who wrote `await` or `.catch` has somewhere to catch it. A native
     /// method that throws for a closed connection and rejects for a
     /// failed statement is a method every caller has to wrap twice.
-    fn task(&self, env: &Env, statement: String, params: Option<Object<'_>>) -> QueryTask {
+    fn task(
+        &self,
+        env: &Env,
+        statement: String,
+        params: Option<Object<'_>>,
+        options: Option<Object<'_>>,
+    ) -> QueryTask {
         // The parameters are read here rather than on the threadpool
         // thread, because reading a JavaScript value is something only
-        // the thread that owns the runtime may do.
+        // the thread that owns the runtime may do. So is adding the
+        // listener the signal is watched through.
         let bound = if self.alive.load(Ordering::Acquire) {
             bind(env, params)
+                .and_then(|params| Ok((params, watch(env, options, self.interrupt.clone())?)))
         } else {
             Err(CLOSED.to_string())
         };
-        let (params, refused) = match bound {
-            Ok(params) => (params, None),
-            Err(message) => (Vec::new(), Some(message)),
+        let (params, watch, refused) = match bound {
+            Ok((params, watch)) => (params, watch, None),
+            Err(message) => (Vec::new(), None, Some(message)),
         };
         QueryTask {
             inner: Arc::clone(&self.inner),
             statement,
             params,
+            watch,
             refused,
         }
     }
@@ -303,6 +325,8 @@ pub enum Failure {
     Engine(ZuError),
     /// This client refused the call before the engine saw it.
     Usage(String),
+    /// The caller's signal fired, before the statement or during it.
+    Aborted,
 }
 
 impl From<ZuError> for Failure {
@@ -311,18 +335,50 @@ impl From<ZuError> for Failure {
     }
 }
 
-impl Failure {
-    /// The exception this rejects the caller's promise with.
-    fn raise(self, env: &Env) -> Error {
-        match self {
-            Failure::Engine(err) => raise(env, err),
-            Failure::Usage(message) => usage(env, message),
-        }
-    }
-}
-
 /// What a closed connection says, wherever it is noticed.
 const CLOSED: &str = "the connection is closed, so there is nothing left to run a statement on";
+
+/// What an abort says when the signal that fired named no reason of its
+/// own, which is a signal built by hand rather than by a runtime.
+const ABORTED: &str = "the statement was stopped by the signal it was given";
+
+/// Reads `options.signal` and starts watching it.
+///
+/// Absent options and an absent signal are the same thing and are the
+/// common case, so both cost one property read and no listener. A
+/// `signal` that is not an `AbortSignal` is refused here rather than
+/// where the listener fails to be added, because the caller's mistake is
+/// the value they passed.
+fn watch(
+    env: &Env,
+    options: Option<Object<'_>>,
+    interrupt: Interrupt,
+) -> std::result::Result<Option<Watch>, String> {
+    let Some(options) = options else {
+        return Ok(None);
+    };
+    let signal: Unknown<'_> = options
+        .get_named_property("signal")
+        .map_err(|err| err.reason)?;
+    match signal.get_type().map_err(|err| err.reason)? {
+        ValueType::Undefined | ValueType::Null => Ok(None),
+        ValueType::Object => {
+            let signal = signal.coerce_to_object().map_err(|err| err.reason)?;
+            if signal
+                .get_named_property::<Unknown<'_>>("aborted")
+                .and_then(|aborted| aborted.get_type())
+                .map_err(|err| err.reason)?
+                != ValueType::Boolean
+            {
+                return Err("signal is an object that is not an AbortSignal".to_string());
+            }
+            Watch::new(env, signal, interrupt)
+                .map(Some)
+                .map_err(|err| err.reason)
+        }
+        other => Err(format!("signal is a {other}, which is not an AbortSignal")),
+    }
+}
 
 /// Reads the parameter object into the values the engine binds.
 ///
@@ -352,6 +408,8 @@ pub struct QueryTask {
     inner: Arc<Mutex<Option<zudb::Connection>>>,
     statement: String,
     params: Vec<(String, Value)>,
+    /// The signal watching this statement, when the caller gave one.
+    watch: Option<Watch>,
     /// Why this statement is not going to run, when it is not.
     refused: Option<String>,
 }
@@ -383,14 +441,62 @@ impl QueryTask {
         let Some(conn) = held.as_mut() else {
             return Err(Failure::Usage(CLOSED.to_string()));
         };
+        // From here the connection is this statement's, so this is where
+        // a signal can start stopping it and where it stops being able
+        // to. A signal that fired first ends the statement without the
+        // engine ever seeing it, which is the whole point of asking.
+        if let Some(watch) = &self.watch
+            && !watch.enter()
+        {
+            watch.leave();
+            return Err(Failure::Aborted);
+        }
         let params: Vec<(&str, Value)> = self
             .params
             .iter()
             .map(|(name, value)| (name.as_str(), value.clone()))
             .collect();
         let names = Names::of(conn.session_mut().catalog());
-        let result = conn.query_with(&self.statement, &params)?;
-        Ok((result, names))
+        let result = conn.query_with(&self.statement, &params);
+        if let Some(watch) = &self.watch {
+            watch.leave();
+            // An interrupt is the engine's answer to somebody having
+            // asked, and the only somebody here is the caller's signal.
+            // Reported as an abort rather than as the engine condition,
+            // because a caller who wrote `catch` around a timeout wants
+            // their own reason back and not a GQLSTATUS.
+            if watch.asked() && matches!(result, Err(ZuError::Interrupted)) {
+                return Err(Failure::Aborted);
+            }
+        }
+        Ok((result?, names))
+    }
+
+    /// The exception this rejects the caller's promise with.
+    ///
+    /// An abort rejects with the signal's own reason, which is what
+    /// `fetch` does: a caller who wrote `AbortSignal.timeout(50)` gets
+    /// back the `TimeoutError` that signal carries, and one who wrote
+    /// `controller.abort(new MyError())` gets their own object rather
+    /// than a description of it.
+    fn failed(&self, env: &Env, failure: Failure) -> Error {
+        match failure {
+            Failure::Engine(err) => raise(env, err),
+            Failure::Usage(message) => usage(env, message),
+            Failure::Aborted => self
+                .watch
+                .as_ref()
+                .and_then(|watch| watch.reason(env))
+                .map_or_else(|| aborted(env, ABORTED), Error::from),
+        }
+    }
+
+    /// Takes the listener back off the signal, whatever happened.
+    fn release(&mut self, env: &Env) -> Result<()> {
+        match self.watch.take() {
+            Some(watch) => watch.release(env),
+            None => Ok(()),
+        }
     }
 }
 
@@ -403,8 +509,12 @@ impl<'task> ScopedTask<'task> for QueryTask {
     }
 
     fn resolve(&mut self, env: &'task Env, output: Self::Output) -> Result<Self::JsValue> {
-        let (result, names) = output.map_err(|failure| failure.raise(env))?;
+        let (result, names) = output.map_err(|failure| self.failed(env, failure))?;
         rows(env, &result, &names)
+    }
+
+    fn finally(mut self, env: Env) -> Result<()> {
+        self.release(&env)
     }
 }
 
@@ -481,7 +591,11 @@ impl<'task> ScopedTask<'task> for ExecTask {
     }
 
     fn resolve(&mut self, env: &'task Env, output: Self::Output) -> Result<Self::JsValue> {
-        output.map_err(|failure| failure.raise(env))
+        output.map_err(|failure| self.0.failed(env, failure))
+    }
+
+    fn finally(mut self, env: Env) -> Result<()> {
+        self.0.release(&env)
     }
 }
 

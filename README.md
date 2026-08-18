@@ -35,9 +35,21 @@ The rows are an array, so iterating them is `for (const row of rows)` and nothin
 
 ## What works today
 
-`connect`, `query`, `exec`, `close`, `dispose` and `await using`. Named parameters both ways, including lists, records and nesting. Every scalar the engine has, plus nodes, edges and paths with their tables named rather than numbered, and `ZuDate`, `ZuTime`, `ZuTimestamp` and `ZuDuration`. Read-only connections, memory and thread limits. The full error surface above.
+`connect`, `query`, `exec`, `close`, `dispose` and `await using`. Named parameters both ways, including lists, records and nesting. Every scalar the engine has, plus nodes, edges and paths with their tables named rather than numbered, and `ZuDate`, `ZuTime`, `ZuTimestamp` and `ZuDuration`. Read-only connections, memory and thread limits. An `AbortSignal` on any statement. The full error surface above.
 
 Build it with `npm run build`, and run the suite with `npm test`. Nothing is published yet, so `npm i zudb` is not a thing you can type at anybody's terminal, but everything it will do is built and installed on every run of the release workflow.
+
+## Stopping a statement
+
+Every statement takes a third argument, and what is in it today is a signal:
+
+```ts
+const rows = await conn.query(statement, params, { signal: AbortSignal.timeout(50) });
+```
+
+It is the signal JavaScript already has, so a timeout written like the one above, the signal a framework hands a request handler, and an `AbortSignal.any([...])` composed out of both all work here without anything being adapted. When it fires, the engine's interrupt is raised, the executor notices it at a boundary it was already stopping at, and the statement ends inside a vector of rows rather than at the end of the scan. The connection is left exactly as it was, so the statement after a stopped one runs normally.
+
+What the promise rejects with is the signal's own reason, which is what `fetch` does: `AbortSignal.timeout(50)` rejects with the runtime's `TimeoutError`, `controller.abort(new RequestGone())` rejects with the `RequestGone` you made, and a bare `controller.abort()` rejects with the runtime's `AbortError`. A signal that has already fired stops the statement before the engine sees it at all. A signal that never fires costs one listener, taken off again when the statement ends, whether it answered, failed or was stopped.
 
 ## Installing, once there is something to install
 
@@ -60,7 +72,7 @@ Anything outside that table has no binary and no source build to fall back on, s
 
 ## Still to come
 
-`AsyncIterable` and Web Streams over a result, and `AbortSignal` wired to the engine's interrupt. `bigIntMode`. `toTemporal()` and `{ temporal: true }`, for the runtimes where Temporal is unflagged: it reached Stage 4 in March 2026 and is unflagged in Node 26, but Node 24 is still the active LTS and Safari is still behind a flag, which is why the stable types are the four classes above. Dual ESM and CJS, with types first in every export condition. Bun and Deno in CI, and the WASM build for the browser.
+`AsyncIterable` and Web Streams over a result. `bigIntMode`. `toTemporal()` and `{ temporal: true }`, for the runtimes where Temporal is unflagged: it reached Stage 4 in March 2026 and is unflagged in Node 26, but Node 24 is still the active LTS and Safari is still behind a flag, which is why the stable types are the four classes above. Dual ESM and CJS, with types first in every export condition. Bun and Deno in CI, and the WASM build for the browser.
 
 ## Runtimes
 

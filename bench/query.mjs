@@ -58,6 +58,10 @@ async function time(run) {
   return best
 }
 
+// A signal nobody ever fires, which is the shape almost every signal
+// passed to a database has.
+const idle = new AbortController()
+
 const cases = [
   {
     name: 'scan, two columns',
@@ -83,6 +87,15 @@ const cases = [
     name: 'aggregate, one row out',
     per: 'statement',
     run: () => conn.query('MATCH (p:person) RETURN count(*) AS n'),
+  },
+  {
+    // What watching a signal costs a statement nobody stops, which is
+    // every statement in a server that passes the request's signal down.
+    // A listener added and taken off again, once per statement and not
+    // once per row, so the number to read this against is the one above.
+    name: 'aggregate, one signal in',
+    per: 'statement',
+    run: () => conn.query('MATCH (p:person) RETURN count(*) AS n', null, { signal: idle.signal }),
   },
   {
     name: 'aggregate, one parameter in',
