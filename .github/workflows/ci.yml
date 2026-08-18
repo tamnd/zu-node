@@ -153,9 +153,13 @@ jobs:
   # everyone to ignore it. --error-exitcode is what makes a report a
   # failure rather than something in a log nobody opens.
   #
-  # No suppressions. There is nothing to suppress, which is worth saying
-  # out loud: the day this needs a suppression file is the day somebody
-  # should read what it wants suppressed before writing it down.
+  # tools/valgrind.supp is three lines of rule and says what it leaves
+  # out. It exists because which node this runs on decides what leaks: a
+  # node linked against the system OpenSSL needs nothing suppressed, and
+  # the one the hosted images install has OpenSSL inside it and holds
+  # twenty four bytes of compression table forever. The rule names the
+  # binary that allocated rather than the leak that was reported, which
+  # is what stops it growing a line every bad week.
   leaks:
     runs-on: ubuntu-latest
     steps:
@@ -170,9 +174,33 @@ jobs:
       # actually ships, and an instrumented one would be a different
       # program with a different allocator underneath it.
       - run: npm run build:debug
-      - run: |
+      # The gate is validated the only way a gate can be: a deliberate
+      # leak has to fail it, and it has to be a leak of the shape being
+      # looked for, out of a shared object node loaded rather than out
+      # of node. Preloaded rather than required, because a real napi
+      # module is a lot of code to write for four thousand bytes and
+      # nothing about the check needs node to have called it.
+      - name: A leak the job is meant to catch, caught
+        run: |
+          cat > /tmp/leak.c <<'EOF'
+          #include <stdlib.h>
+          __attribute__((constructor)) static void leak(void) {
+            void *lost = malloc(4096);
+            (void)lost;
+          }
+          EOF
+          cc -shared -fPIC -o /tmp/leak.so /tmp/leak.c
+          set +e
+          LD_PRELOAD=/tmp/leak.so valgrind --error-exitcode=1 --leak-check=full \
+            --show-leak-kinds=definite --errors-for-leak-kinds=definite \
+            --suppressions=tools/valgrind.supp -q \
+            node -e ''
+          test $? -eq 1 || { echo "the leak gate did not fire on a leak"; exit 1; }
+      - name: The suite, counted
+        run: |
           valgrind --error-exitcode=1 --leak-check=full \
-            --errors-for-leak-kinds=definite -q \
+            --show-leak-kinds=definite --errors-for-leak-kinds=definite \
+            --suppressions=tools/valgrind.supp -q \
             node --test "test/*.test.mjs"
 
   # Bun and Deno run the same suite over the same binary, because the
@@ -196,7 +224,13 @@ jobs:
       - run: npm run build:debug
       # `bun test` and not `bun run`, because the tests are written
       # against `node:test` and Bun's shim for it refuses to register a
-      # test outside its own runner.
+      # test outside its own runner. The shim brings Bun's own five
+      # second per-test timeout with it, which node does not have and
+      # two of these tests do not fit inside: they build a table of
+      # sixty thousand people so that a stream has something to be
+      # faster than, and the build alone is most of five seconds on a
+      # shared runner. `--timeout` puts the limit where it catches a
+      # hang rather than a fixture.
       - run: npm run test:bun
 
   deno:

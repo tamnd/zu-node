@@ -1,0 +1,74 @@
+# What the leak job does not count, and why.
+#
+# Node leaks a little on purpose, and which little depends on how the
+# binary was built. A node linked against the system OpenSSL leaks
+# nothing this job can see, because the library is somebody else's file
+# and the loader never unloads it; the node that GitHub's runners
+# install has OpenSSL statically inside it, so its one-time table of
+# built-in compression methods is twenty four bytes allocated at the
+# first use of the default library context and never freed, and it lands
+# in this report as a definite leak inside the node binary. That is a
+# real allocation and it is not this addon's, and no version of this
+# addon can free it.
+#
+# So the rule is one rule, and it is narrow on purpose. A leak is
+# ignored only when the frame that allocated it is inside the node
+# binary itself. Memory this addon allocates has zudb.*.node in that
+# frame instead and is reported, which is what the job is for. The usual
+# shape of a suppression file, a list that grows a line every time
+# somebody wants the build green, would suppress the thing being looked
+# for on the first bad week; this one cannot, because it names the
+# allocator rather than the symptom.
+#
+# The gap it leaves, said out loud: a napi handle this addon leaks was
+# allocated by node on its behalf, so it lands under this rule. That
+# leak is the one the suite catches from the other side, where it opens
+# and closes a thousand connections and counts the process descriptors
+# before and after.
+
+{
+   node allocating for itself, malloc
+   Memcheck:Leak
+   match-leak-kinds: definite,possible
+   fun:malloc
+   obj:*/node
+}
+
+{
+   node allocating for itself, realloc
+   Memcheck:Leak
+   match-leak-kinds: definite,possible
+   fun:realloc
+   obj:*/node
+}
+
+{
+   node allocating for itself, calloc
+   Memcheck:Leak
+   match-leak-kinds: definite,possible
+   fun:calloc
+   obj:*/node
+}
+
+# Node is C++ and most of what it keeps comes through here rather than
+# through malloc: `node -e ''` alone holds on to the script object it
+# compiled. This addon is Rust and allocates through the C entries
+# above, so naming the C++ ones costs it nothing. The names are the
+# mangled ones because that is what valgrind matches against, whatever
+# it prints: _Znwm is operator new and _Znam is operator new[].
+
+{
+   node allocating for itself, new
+   Memcheck:Leak
+   match-leak-kinds: definite,possible
+   fun:_Znw*
+   obj:*/node
+}
+
+{
+   node allocating for itself, new[]
+   Memcheck:Leak
+   match-leak-kinds: definite,possible
+   fun:_Zna*
+   obj:*/node
+}
