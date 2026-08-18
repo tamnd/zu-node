@@ -89,6 +89,66 @@ export interface ZuRows<Row = Record<string, ZuValue>> extends Array<Row> {
 }
 
 /**
+ * One batch of a streamed result.
+ *
+ * The rows of a whole result with the same array trick and one fewer
+ * property: `columns` is the statement's projection and is the same on
+ * every batch of one stream, and what a statement completed with is not
+ * known until it has, so it is on the summary rather than here.
+ */
+export interface ZuBatch<Row = Record<string, ZuValue>> extends Array<Row> {
+  readonly columns: string[]
+}
+
+/**
+ * What a streamed statement did, known once it has ended.
+ *
+ * The rows are gone by then, which is the point of streaming, so this
+ * is what is worth keeping about a result nobody held: what it
+ * projected, how much of it was read, whether the reader stopped it
+ * early, and what the engine wanted to say along the way.
+ */
+export interface ZuSummary {
+  readonly columns: string[]
+  /** How many rows were handed over, which is fewer than the statement
+   * would have returned when the reader stopped early. */
+  readonly rows: number
+  readonly stopped: boolean
+  /**
+   * Whether the rows arrived as they were made, rather than the
+   * statement running whole and being handed over in batches
+   * afterwards. A statement that has to see every row before it can
+   * give one, which is `ORDER BY`, `DISTINCT`, the aggregates and
+   * anything that writes, is the second kind, and so is a plan the
+   * pipeline executor does not take. The loop over it reads the same
+   * either way, so this is here for a caller measuring where the time
+   * went rather than for one deciding what to do next.
+   */
+  readonly streamed: boolean
+  readonly notices: ZuNotice[]
+}
+
+/**
+ * What a streamed statement takes beside its parameters.
+ */
+export interface ZuStreamOptions extends ZuStatementOptions {
+  /**
+   * How many rows a batch may hold. The engine's own vector by
+   * default, which is the unit it already works in and the one that
+   * costs nothing to hand over. Name a size when the rows are going
+   * somewhere with a size of its own, an Arrow record batch or an
+   * HTTP chunk.
+   *
+   * A ceiling and not a promise: batches are cut out of rows that have
+   * already been made, so the last piece of a run of them is whatever
+   * was left, and a size above the engine's vector gets the vector. It
+   * is what bounds how much a reader holds at once, which is the
+   * question a caller is asking when they name one.
+   */
+  readonly batchRows?: number
+}
+
+/**
  * What a statement takes beside its parameters.
  *
  * An object rather than a bare signal, because the options that follow
@@ -180,6 +240,15 @@ export declare class Connection {
    */
   exec(statement: string, params?: Record<string, ZuParam> | null, options?: ZuStatementOptions | null): Promise<void>
   /**
+   * Runs one statement and gives back a cursor over its rows.
+   *
+   * The pull underneath `stream`, which is what a program uses. The
+   * statement does not start here: it starts on the first read, so
+   * that a cursor made and not read is not a scan holding the
+   * connection against every statement after it.
+   */
+  cursor(statement: string, params?: Record<string, ZuParam> | null, options?: ZuStreamOptions | null): ZuCursor
+  /**
    * Closes the connection and releases the database.
    *
    * Closing twice does nothing the second time, which is what makes
@@ -197,6 +266,45 @@ export declare class Connection {
    * on every connection as it is made.
    */
   dispose(): Promise<void>
+}
+
+/**
+ * One statement, read a batch at a time.
+ *
+ * This is the pull underneath the stream and not the shape a program
+ * should be reaching for: `conn.stream(...)` gives back something that
+ * is async-iterable, turns into the web's own `ReadableStream`, and
+ * stops itself when the loop over it breaks.
+ */
+export declare class ZuCursor {
+  /**
+   * The next batch of rows, or `null` once the statement has ended.
+   *
+   * An array of row objects with the column names beside it, which
+   * is the value `query` gives for a whole result and for the same
+   * reason: what a caller does with rows is iterate them.
+   */
+  next(): Promise<ZuBatch | null>
+  /**
+   * Stops the statement and waits for it to let go of the
+   * connection.
+   *
+   * Waits, because a stream abandoned while the next statement on
+   * the same connection is already being asked for would make that
+   * statement queue behind a scan nobody is reading. Stopping is not
+   * a failure: the rows already handed over stand, and the summary
+   * says the statement was stopped.
+   */
+  cancel(): Promise<void>
+  /**
+   * What the statement did, once it has ended, and `null` until
+   * then.
+   *
+   * The column names are here as well as beside every batch, because
+   * a statement that gave back no rows gave back no batches either
+   * and its projection is still worth knowing.
+   */
+  get summary(): ZuSummary | null
 }
 
 /**

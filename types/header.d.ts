@@ -89,6 +89,66 @@ export interface ZuRows<Row = Record<string, ZuValue>> extends Array<Row> {
 }
 
 /**
+ * One batch of a streamed result.
+ *
+ * The rows of a whole result with the same array trick and one fewer
+ * property: `columns` is the statement's projection and is the same on
+ * every batch of one stream, and what a statement completed with is not
+ * known until it has, so it is on the summary rather than here.
+ */
+export interface ZuBatch<Row = Record<string, ZuValue>> extends Array<Row> {
+  readonly columns: string[]
+}
+
+/**
+ * What a streamed statement did, known once it has ended.
+ *
+ * The rows are gone by then, which is the point of streaming, so this
+ * is what is worth keeping about a result nobody held: what it
+ * projected, how much of it was read, whether the reader stopped it
+ * early, and what the engine wanted to say along the way.
+ */
+export interface ZuSummary {
+  readonly columns: string[]
+  /** How many rows were handed over, which is fewer than the statement
+   * would have returned when the reader stopped early. */
+  readonly rows: number
+  readonly stopped: boolean
+  /**
+   * Whether the rows arrived as they were made, rather than the
+   * statement running whole and being handed over in batches
+   * afterwards. A statement that has to see every row before it can
+   * give one, which is `ORDER BY`, `DISTINCT`, the aggregates and
+   * anything that writes, is the second kind, and so is a plan the
+   * pipeline executor does not take. The loop over it reads the same
+   * either way, so this is here for a caller measuring where the time
+   * went rather than for one deciding what to do next.
+   */
+  readonly streamed: boolean
+  readonly notices: ZuNotice[]
+}
+
+/**
+ * What a streamed statement takes beside its parameters.
+ */
+export interface ZuStreamOptions extends ZuStatementOptions {
+  /**
+   * How many rows a batch may hold. The engine's own vector by
+   * default, which is the unit it already works in and the one that
+   * costs nothing to hand over. Name a size when the rows are going
+   * somewhere with a size of its own, an Arrow record batch or an
+   * HTTP chunk.
+   *
+   * A ceiling and not a promise: batches are cut out of rows that have
+   * already been made, so the last piece of a run of them is whatever
+   * was left, and a size above the engine's vector gets the vector. It
+   * is what bounds how much a reader holds at once, which is the
+   * question a caller is asking when they name one.
+   */
+  readonly batchRows?: number
+}
+
+/**
  * What a statement takes beside its parameters.
  *
  * An object rather than a bare signal, because the options that follow

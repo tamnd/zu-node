@@ -84,6 +84,44 @@ const cases = [
     run: () => conn.exec('MATCH (p:person) RETURN p.id AS id, p.name AS name'),
   },
   {
+    // The same rows through the streaming path, which is the number to
+    // read the two scans above against: what streaming costs is a
+    // thread, a queue and a promise per batch, and what it saves is
+    // holding the whole result. A stream read to the end is the worst
+    // case for it, since nothing was saved and everything was paid.
+    name: 'stream, two columns',
+    per: 'row',
+    run: async () => {
+      const stream = conn.stream('MATCH (p:person) RETURN p.id AS id, p.name AS name')
+      for await (const row of stream) void row
+    },
+  },
+  {
+    // A batch at a time rather than a row at a time, which is the same
+    // rows with one less iterator between them and the loop.
+    name: 'stream, batch at a time',
+    per: 'row',
+    run: async () => {
+      const stream = conn.stream('MATCH (p:person) RETURN p.id AS id, p.name AS name')
+      for await (const batch of stream.batches()) void batch
+    },
+  },
+  {
+    // What a reader that stops after one batch pays, which is what a
+    // stream is for: the scan under it ends, so this is a statement
+    // whose cost is the batch rather than the table. Per statement,
+    // because the rows it read are a batch and not the table.
+    name: 'stream, first batch only',
+    per: 'statement',
+    run: async () => {
+      const stream = conn.stream('MATCH (p:person) RETURN p.id AS id, p.name AS name')
+      for await (const batch of stream.batches()) {
+        void batch
+        break
+      }
+    },
+  },
+  {
     name: 'aggregate, one row out',
     per: 'statement',
     run: () => conn.query('MATCH (p:person) RETURN count(*) AS n'),

@@ -64,6 +64,15 @@ try {
       "assert.deepEqual(rows.columns, ['name'])",
       "assert.equal(rows[0].name, 'ada')",
       "assert.equal(isZuError(await conn.query('MATCH (').catch((err) => err)), true)",
+      // The streamed path as well, because it is the one part of the
+      // surface that is written in JavaScript over the addon rather
+      // than by the addon, and an installed package is where a missing
+      // file in `files` turns up.
+      "const stream = conn.stream('MATCH (p:person) RETURN p.name AS name')",
+      'const names = []',
+      'for await (const row of stream) names.push(row.name)',
+      "assert.deepEqual(names, ['ada'])",
+      'assert.equal(stream.summary.rows, 1)',
       'await conn.close()',
     ].join('\n'),
   )

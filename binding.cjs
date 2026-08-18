@@ -701,6 +701,7 @@ if (!nativeBinding) {
 
 module.exports = nativeBinding
 module.exports.Connection = nativeBinding.Connection
+module.exports.ZuCursor = nativeBinding.ZuCursor
 module.exports.ZuDate = nativeBinding.ZuDate
 module.exports.ZuDuration = nativeBinding.ZuDuration
 module.exports.ZuNode = nativeBinding.ZuNode

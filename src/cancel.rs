@@ -52,6 +52,44 @@ impl Shared {
     }
 }
 
+/// The half of a watch a running statement uses, which is the half
+/// that can be held on another thread.
+///
+/// A statement in this client runs somewhere the runtime is not: on
+/// libuv's threadpool, or on a thread of its own for a stream. The two
+/// words it sets are plain atomics and the interrupt is the engine's,
+/// so all three travel. The references to the signal and the listener
+/// do not travel with them, because touching either is something only
+/// the thread that owns the runtime may do.
+#[derive(Clone)]
+pub struct Guard(Arc<Shared>);
+
+impl Guard {
+    /// The statement is about to run. `false` means it must not: the
+    /// signal fired first.
+    pub fn enter(&self) -> bool {
+        self.0.running.store(true, Ordering::SeqCst);
+        !self.0.asked.load(Ordering::SeqCst)
+    }
+
+    /// The statement is done with the connection.
+    ///
+    /// The flag goes down first, so a signal firing now raises nothing,
+    /// and then the interrupt is put back down, so a stop that landed in
+    /// the moment between the statement finishing and this call cannot
+    /// end whatever runs next on the same connection.
+    pub fn leave(&self) {
+        self.0.running.store(false, Ordering::SeqCst);
+        self.0.interrupt.clear();
+    }
+
+    /// Whether the signal fired at all, which is what tells an interrupt
+    /// the caller asked for apart from one they did not.
+    pub fn asked(&self) -> bool {
+        self.0.asked.load(Ordering::SeqCst)
+    }
+}
+
 /// A signal watching one statement.
 ///
 /// It is made on the thread that owns the runtime, because that is the
@@ -111,28 +149,26 @@ impl Watch {
         })
     }
 
+    /// The part of this a statement takes with it to wherever it runs.
+    pub fn guard(&self) -> Guard {
+        Guard(Arc::clone(&self.shared))
+    }
+
     /// The statement is about to run. `false` means it must not: the
     /// signal fired first.
     pub fn enter(&self) -> bool {
-        self.shared.running.store(true, Ordering::SeqCst);
-        !self.shared.asked.load(Ordering::SeqCst)
+        self.guard().enter()
     }
 
     /// The statement is done with the connection.
-    ///
-    /// The flag goes down first, so a signal firing now raises nothing,
-    /// and then the interrupt is put back down, so a stop that landed in
-    /// the moment between the statement finishing and this call cannot
-    /// end whatever runs next on the same connection.
     pub fn leave(&self) {
-        self.shared.running.store(false, Ordering::SeqCst);
-        self.shared.interrupt.clear();
+        self.guard().leave()
     }
 
     /// Whether the signal fired at all, which is what tells an interrupt
     /// the caller asked for apart from one they did not.
     pub fn asked(&self) -> bool {
-        self.shared.asked.load(Ordering::SeqCst)
+        self.guard().asked()
     }
 
     /// What the signal gives as its reason, if it gives one.
