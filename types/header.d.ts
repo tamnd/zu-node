@@ -89,6 +89,29 @@ export interface ZuRows<Row = Record<string, ZuValue>> extends Array<Row> {
 }
 
 /**
+ * What a statement takes beside its parameters.
+ *
+ * An object rather than a bare signal, because the options that follow
+ * it belong in the same place and a third argument that changes meaning
+ * is one nobody can read at a call site.
+ */
+export interface ZuStatementOptions {
+  /**
+   * Stops the statement when it fires, through the same interrupt a
+   * shell answers `Ctrl-C` with: the executor notices at the boundary it
+   * was already stopping at, the statement ends, and the connection is
+   * exactly as it was. The promise rejects with whatever the signal
+   * gives as its reason, which is what `fetch` does, so
+   * `AbortSignal.timeout(50)` rejects with a `TimeoutError` and
+   * `controller.abort(new MyError())` rejects with `MyError`.
+   *
+   * A signal that has already fired stops the statement before the
+   * engine sees it at all.
+   */
+  readonly signal?: AbortSignal
+}
+
+/**
  * What a failed call throws.
  *
  * An ordinary `Error`, so every `catch`, logger and unhandled rejection

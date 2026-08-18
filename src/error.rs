@@ -128,6 +128,26 @@ fn usage_object<'env>(env: &'env Env, message: &str) -> Result<Object<'env>> {
     Ok(object)
 }
 
+/// A statement stopped by a signal that named no reason of its own.
+///
+/// Named `AbortError` rather than anything of this client's, because
+/// that is the name every runtime gives the reason it makes for a signal
+/// nobody gave one to, and a caller testing `err.name === 'AbortError'`
+/// is testing the one thing that is true of both.
+pub fn aborted(env: &Env, message: &str) -> Error {
+    match aborted_object(env, message).and_then(|object| object.into_unknown(env)) {
+        Ok(value) => Error::from(value),
+        Err(broken) => broken,
+    }
+}
+
+fn aborted_object<'env>(env: &'env Env, message: &str) -> Result<Object<'env>> {
+    let mut object = blank(env, message)?;
+    object.set("name", "AbortError")?;
+    object.set("retryable", false)?;
+    Ok(object)
+}
+
 /// An `Error` with `message` and nothing else on it yet.
 ///
 /// napi writes the status it was handed into `code`, and `code` here is
