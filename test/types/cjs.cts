@@ -2,7 +2,14 @@
 // resolution through a different condition to a different file, and so
 // is worth compiling separately rather than assuming.
 
-import { connect, isZuError, ZuTimestamp, type ZuParam, type ZuStream } from 'zudb'
+import {
+  connect,
+  isZuError,
+  ZuTimestamp,
+  type ZuParam,
+  type ZuStream,
+  type ZuTransactionOptions,
+} from 'zudb'
 
 export async function total(path: string): Promise<number> {
   // The mode is on the statement here, so the rows it gives back are
@@ -40,6 +47,25 @@ export async function moment(path: string, at: bigint): Promise<unknown> {
     await conn.exec('INSERT (e:event {id: 1, at: $at})', { at: new ZuTimestamp(at) })
     return new ZuTimestamp(at, 120).toTemporal()
   } finally {
+    conn.close()
+  }
+}
+
+export async function span(path: string, options: ZuTransactionOptions): Promise<number> {
+  // The options are an object of their own, so a caller can build one
+  // and pass it around. A `try` and a `finally` is the other spelling
+  // of the block below, for a program that cannot write `await using`,
+  // and the rollback in it is the same word the disposal would run.
+  const conn = await connect(path)
+  const tx = await conn.transaction(options)
+  try {
+    const rows = await conn.query<{ n: number }>('MATCH (p:person) RETURN count(*) AS n', null, {
+      bigIntMode: 'number',
+    })
+    await tx.commit()
+    return rows[0]?.n ?? 0
+  } finally {
+    if (!tx.done) await tx.rollback()
     conn.close()
   }
 }

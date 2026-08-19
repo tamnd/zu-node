@@ -283,6 +283,21 @@ export interface ZuStatementOptions {
 }
 
 /**
+ * What a transaction takes when it starts.
+ */
+export interface ZuTransactionOptions {
+  /**
+   * Starts it `READ ONLY`, which the engine refuses a write inside of
+   * at the statement that writes rather than at this call.
+   *
+   * Worth asking for on a span that only reads, because saying so is
+   * how a statement that was not meant to write is stopped by the
+   * database rather than by review.
+   */
+  readonly readOnly?: boolean
+}
+
+/**
  * What a failed call throws.
  *
  * An ordinary `Error`, so every `catch`, logger and unhandled rejection
@@ -334,6 +349,42 @@ export declare class Connection {
   /** Whether the connection is still open. */
   get open(): boolean
   /**
+   * Whether an explicit transaction is running on this connection.
+   *
+   * True inside a `transaction()` and true after a `START
+   * TRANSACTION` written by hand, because it is asked of the session
+   * rather than counted here. A statement written on its own runs in
+   * a transaction of its own and this stays false for it: what it
+   * answers is whether a span is open, not whether anything is
+   * atomic.
+   */
+  get inTransaction(): boolean
+  /**
+   * Starts a transaction and hands it back.
+   *
+   * It starts here rather than at the first statement inside it, so a
+   * transaction that cannot start says so at the line that asked. A
+   * connection is inside one transaction at a time and asking for a
+   * second while one is open is refused by the engine rather than
+   * nested, because a transaction inside a transaction is a promise
+   * this database does not make.
+   *
+   * ```js
+   * await using tx = await conn.transaction()
+   * await conn.exec('INSERT (a:account {uid: 1, balance: 100})')
+   * await conn.exec('INSERT (b:account {uid: 2, balance: 0})')
+   * await tx.commit()
+   * ```
+   *
+   * The `await using` is the rollback nobody remembers to write. It
+   * undoes the transaction unless the block committed it, which is
+   * the opposite of what Python's `with` block does here and is the
+   * only honest reading in JavaScript: a disposal is not told whether
+   * the scope it is leaving threw, so a disposal that committed would
+   * commit half of the work of a block that failed.
+   */
+  transaction(options?: ZuTransactionOptions | null): Promise<Transaction>
+  /**
    * Runs one statement and gives back its rows.
    *
    * The parameters are named, never positional, because zuQL names
@@ -375,6 +426,50 @@ export declare class Connection {
    * It is also reachable as `Symbol.asyncDispose`, which is what
    * `await using` actually looks for and which [`wire_disposal`] puts
    * on every connection as it is made.
+   */
+  dispose(): Promise<void>
+}
+
+/**
+ * A transaction that has been started and not yet ended.
+ *
+ * Take one with `Connection.transaction`. It starts when it is taken,
+ * so a transaction that cannot start says so at the line that asked,
+ * and the statements that run inside it are the ones written on the
+ * connection it came from.
+ */
+export declare class Transaction {
+  /**
+   * Whether this transaction was started `READ ONLY`, which the
+   * engine refuses a write inside of at the statement that writes.
+   */
+  get readOnly(): boolean
+  /**
+   * Whether this transaction has already been committed or rolled
+   * back.
+   */
+  get done(): boolean
+  /**
+   * Ends the transaction and keeps what it wrote.
+   *
+   * Doing it twice is refused rather than ignored. A second commit is
+   * a program that has lost track of where its transaction ends, and
+   * the statements between the two are in neither of them.
+   */
+  commit(): Promise<void>
+  /** Ends the transaction and throws away what it wrote. */
+  rollback(): Promise<void>
+  /**
+   * The undo `await using` calls, which is the intended way to scope
+   * a transaction.
+   *
+   * It rolls back, and it does nothing at all when the transaction
+   * has already ended, which is what makes a committed block and a
+   * failed one both leave through here without saying anything.
+   *
+   * It is also reachable as `Symbol.asyncDispose`, which is what
+   * `await using` actually looks for and which [`wire_disposal`] puts
+   * on every transaction as it is made.
    */
   dispose(): Promise<void>
 }

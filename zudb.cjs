@@ -163,6 +163,7 @@ module.exports = {
   abiVersion: binding.abiVersion,
   isZuError,
   Connection: binding.Connection,
+  Transaction: binding.Transaction,
   ZuStream,
   // The pull underneath a stream, which `conn.cursor(...)` hands back
   // and almost nobody should be holding. It is here because it is in

@@ -36,6 +36,7 @@ use crate::cancel::Watch;
 use crate::error::{aborted, raise, usage};
 use crate::stream::{self, Started, ZuCursor};
 use crate::temporal;
+use crate::txn::StartTask;
 use crate::value::{Ints, Shape, Spelling, from_js, to_js};
 
 /// What a connection can be opened with.
@@ -108,6 +109,18 @@ pub struct Connection {
     /// to the session and is the same one for the connection's whole
     /// life, so once is enough.
     interrupt: Interrupt,
+    /// Whether an explicit transaction is running on this connection,
+    /// kept beside the lock for the same reason [`Connection::alive`]
+    /// is: asking should not queue behind the statement being asked
+    /// about.
+    ///
+    /// Written by every statement that runs, out of the session itself,
+    /// which is what makes it exact rather than a tally this client
+    /// keeps. Nothing but a statement can start or end a transaction, so
+    /// a caller who reads this between two of their own reads the truth,
+    /// and a caller who reads it from underneath a statement in flight
+    /// is asking a question that has no answer yet either way.
+    in_txn: Arc<AtomicBool>,
     /// How this connection's statements spell the values they give
     /// back, unless one of them asks for something else.
     spelling: Spelling,
@@ -218,26 +231,31 @@ impl<'task> ScopedTask<'task> for ConnectTask {
             interrupt: opened.conn.interrupt(),
             inner: Arc::new(Mutex::new(Some(opened.conn))),
             alive: Arc::new(AtomicBool::new(true)),
+            in_txn: Arc::new(AtomicBool::new(false)),
             spelling: opened.spelling,
             path: opened.path,
             read_only: opened.read_only,
         }
         .into_instance(env)?;
-        wire_disposal(env, &mut instance)?;
+        wire_disposal(env, &mut instance, "dispose")?;
         Ok(instance)
     }
 }
 
-/// Puts `dispose` on the connection under `Symbol.asyncDispose`, which
-/// is the key `await using` looks up and the one thing about this class
+/// Puts a method on an instance under `Symbol.asyncDispose`, which is
+/// the key `await using` looks up and the one thing about these classes
 /// that cannot be spelled in the attribute that declares the rest of
-/// it: a method's name there is a string, and this key is a symbol.
+/// them: a method's name there is a string, and this key is a symbol.
 ///
 /// On the instance rather than on the prototype, because reaching the
 /// prototype from here means calling `Object.getPrototypeOf` through
 /// three more layers of FFI for a property that is looked up once per
-/// connection either way.
-fn wire_disposal(env: &Env, instance: &mut ClassInstance<'_, Connection>) -> Result<()> {
+/// object either way.
+pub(crate) fn wire_disposal<T: MaybeTypeTag>(
+    env: &Env,
+    instance: &mut ClassInstance<'_, T>,
+    method: &str,
+) -> Result<()> {
     // `Symbol` is a function, and the well-known symbols hang off it as
     // properties of that function.
     let symbols: Function<'_, (), Unknown<'_>> = env.get_global()?.get_named_property("Symbol")?;
@@ -247,7 +265,7 @@ fn wire_disposal(env: &Env, instance: &mut ClassInstance<'_, Connection>) -> Res
     if key.get_type()? != ValueType::Symbol {
         return Ok(());
     }
-    let dispose: Unknown<'_> = instance.get_named_property("dispose")?;
+    let dispose: Unknown<'_> = instance.get_named_property(method)?;
     instance.set_property(key, dispose)
 }
 
@@ -298,6 +316,68 @@ impl Connection {
     #[napi(getter)]
     pub fn open(&self) -> bool {
         self.alive.load(Ordering::Acquire)
+    }
+
+    /// Whether an explicit transaction is running on this connection.
+    ///
+    /// True inside a `transaction()` and true after a `START
+    /// TRANSACTION` written by hand, because it is asked of the session
+    /// rather than counted here. A statement written on its own runs in
+    /// a transaction of its own and this stays false for it: what it
+    /// answers is whether a span is open, not whether anything is
+    /// atomic.
+    #[napi(getter)]
+    pub fn in_transaction(&self) -> bool {
+        self.in_txn.load(Ordering::Acquire)
+    }
+
+    /// Starts a transaction and hands it back.
+    ///
+    /// It starts here rather than at the first statement inside it, so a
+    /// transaction that cannot start says so at the line that asked. A
+    /// connection is inside one transaction at a time and asking for a
+    /// second while one is open is refused by the engine rather than
+    /// nested, because a transaction inside a transaction is a promise
+    /// this database does not make.
+    ///
+    /// ```js
+    /// await using tx = await conn.transaction()
+    /// await conn.exec('INSERT (a:account {uid: 1, balance: 100})')
+    /// await conn.exec('INSERT (b:account {uid: 2, balance: 0})')
+    /// await tx.commit()
+    /// ```
+    ///
+    /// The `await using` is the rollback nobody remembers to write. It
+    /// undoes the transaction unless the block committed it, which is
+    /// the opposite of what Python's `with` block does here and is the
+    /// only honest reading in JavaScript: a disposal is not told whether
+    /// the scope it is leaving threw, so a disposal that committed would
+    /// commit half of the work of a block that failed.
+    #[napi(
+        ts_args_type = "options?: ZuTransactionOptions | null",
+        ts_return_type = "Promise<Transaction>"
+    )]
+    pub fn transaction(&self, options: Option<Object<'_>>) -> AsyncTask<StartTask> {
+        let read_only = match flag(options.as_ref(), "readOnly") {
+            Ok(read_only) => read_only.unwrap_or(false),
+            Err(message) => return AsyncTask::new(self.start(false, Some(message))),
+        };
+        let refused = match self.alive.load(Ordering::Acquire) {
+            true => None,
+            false => Some(CLOSED.to_string()),
+        };
+        AsyncTask::new(self.start(read_only, refused))
+    }
+
+    /// The task that starts one, whether or not it is going to work.
+    fn start(&self, read_only: bool, refused: Option<String>) -> StartTask {
+        StartTask::new(
+            Arc::clone(&self.inner),
+            Arc::clone(&self.alive),
+            Arc::clone(&self.in_txn),
+            read_only,
+            refused,
+        )
     }
 
     /// Runs one statement and gives back its rows.
@@ -393,6 +473,7 @@ impl Connection {
             Started {
                 inner: Arc::clone(&self.inner),
                 alive: Arc::clone(&self.alive),
+                in_txn: Arc::clone(&self.in_txn),
                 statement,
                 params,
                 spelling,
@@ -449,6 +530,7 @@ impl Connection {
         QueryTask {
             inner: Arc::clone(&self.inner),
             alive: Arc::clone(&self.alive),
+            in_txn: Arc::clone(&self.in_txn),
             statement,
             params,
             spelling,
@@ -543,9 +625,53 @@ impl From<ZuError> for Failure {
     }
 }
 
+/// Takes the connection for the length of one statement, and says why
+/// it could not be had when it could not.
+///
+/// Every statement that runs on the threadpool goes through here, which
+/// is what makes the three things it decides be decided once: what an
+/// empty slot means, what a poisoned lock means, and whether the
+/// connection is inside a transaction now that the statement has run.
+/// That last one is written here rather than by each caller because a
+/// caller that forgot would leave `inTransaction` describing some
+/// earlier statement.
+pub(crate) fn with<T>(
+    inner: &Mutex<Option<zudb::Connection>>,
+    alive: &AtomicBool,
+    in_txn: &AtomicBool,
+    run: impl FnOnce(&mut zudb::Connection) -> std::result::Result<T, Failure>,
+) -> std::result::Result<T, Failure> {
+    // A thread that panicked inside the engine left the connection in a
+    // state nothing here can vouch for, so this says so rather than
+    // carrying on with it.
+    let mut held = inner
+        .lock()
+        .map_err(|_| Failure::Usage(POISONED.to_string()))?;
+    // Closed between the call and the thread picking it up, which is a
+    // race the caller cannot see and this has to check anyway. Or lent
+    // to a stream that has not finished, which is the same empty slot
+    // and a different thing to say about it.
+    let Some(conn) = held.as_mut() else {
+        return Err(Failure::Usage(
+            match alive.load(Ordering::Acquire) {
+                true => STREAMING,
+                false => CLOSED,
+            }
+            .to_string(),
+        ));
+    };
+    let answered = run(&mut *conn);
+    in_txn.store(conn.session_mut().in_transaction(), Ordering::Release);
+    answered
+}
+
 /// What a closed connection says, wherever it is noticed.
 pub(crate) const CLOSED: &str =
     "the connection is closed, so there is nothing left to run a statement on";
+
+/// What a connection says when the thread that last held it panicked.
+pub(crate) const POISONED: &str =
+    "the connection was left in an unknown state by a statement that panicked";
 
 /// What a connection a stream is still reading says to the next
 /// statement.
@@ -636,6 +762,31 @@ fn batch_rows(options: Option<&Object<'_>>) -> std::result::Result<Option<u32>, 
         }
         Some(rows) => Err(format!(
             "batchRows is {rows}, and a batch holds a whole number of rows, one at the least"
+        )),
+    }
+}
+
+/// Reads an option that has to be a boolean, and says what arrived
+/// instead.
+///
+/// Absent and `null` are the same as unwritten, which is what makes
+/// `{ readOnly: wanted }` work for a caller whose `wanted` came out of
+/// a config file. Anything else is refused rather than made truthy: a
+/// `readOnly: 'false'` that opened a writing transaction would be a
+/// string nobody meant read as the opposite of itself.
+fn flag(options: Option<&Object<'_>>, name: &str) -> std::result::Result<Option<bool>, String> {
+    let Some(options) = options else {
+        return Ok(None);
+    };
+    let value: Unknown<'_> = options.get_named_property(name).map_err(|err| err.reason)?;
+    match value.get_type().map_err(|err| err.reason)? {
+        ValueType::Undefined | ValueType::Null => Ok(None),
+        ValueType::Boolean => bool::from_unknown(value)
+            .map(Some)
+            .map_err(|err| err.reason),
+        other => Err(format!(
+            "{name} is {}, and it is either true or false",
+            worded(other)
         )),
     }
 }
@@ -753,6 +904,9 @@ pub struct QueryTask {
     /// Whether the connection is still open, which is what tells an
     /// empty slot that was closed from one a stream is holding.
     alive: Arc<AtomicBool>,
+    /// Where this statement writes whether the connection is inside a
+    /// transaction now that it has run.
+    in_txn: Arc<AtomicBool>,
     statement: String,
     params: Vec<(String, Value)>,
     /// How this statement spells the values it gives back.
@@ -773,60 +927,40 @@ impl QueryTask {
         if let Some(message) = self.refused.take() {
             return Err(Failure::Usage(message));
         }
-        let mut held = match self.inner.lock() {
-            Ok(held) => held,
-            // A thread that panicked inside the engine left the
-            // connection in a state nothing here can vouch for, so this
-            // says so rather than carrying on with it.
-            Err(_) => {
-                return Err(Failure::Usage(
-                    "the connection was left in an unknown state by a statement that panicked"
-                        .to_string(),
-                ));
-            }
-        };
-        // Closed between the call and the thread picking it up, which is
-        // a race the caller cannot see and this has to check anyway. Or
-        // lent to a stream that has not finished, which is the same
-        // empty slot and a different thing to say about it.
-        let Some(conn) = held.as_mut() else {
-            return Err(Failure::Usage(
-                match self.alive.load(Ordering::Acquire) {
-                    true => STREAMING,
-                    false => CLOSED,
-                }
-                .to_string(),
-            ));
-        };
-        // From here the connection is this statement's, so this is where
-        // a signal can start stopping it and where it stops being able
-        // to. A signal that fired first ends the statement without the
-        // engine ever seeing it, which is the whole point of asking.
-        if let Some(watch) = &self.watch
-            && !watch.enter()
-        {
-            watch.leave();
-            return Err(Failure::Aborted);
-        }
-        let params: Vec<(&str, Value)> = self
-            .params
-            .iter()
-            .map(|(name, value)| (name.as_str(), value.clone()))
-            .collect();
-        let shape = Shape::of(conn.session_mut().catalog(), self.spelling);
-        let result = conn.query_with(&self.statement, &params);
-        if let Some(watch) = &self.watch {
-            watch.leave();
-            // An interrupt is the engine's answer to somebody having
-            // asked, and the only somebody here is the caller's signal.
-            // Reported as an abort rather than as the engine condition,
-            // because a caller who wrote `catch` around a timeout wants
-            // their own reason back and not a GQLSTATUS.
-            if watch.asked() && matches!(result, Err(ZuError::Interrupted)) {
+        let (statement, params, spelling, watch) =
+            (&self.statement, &self.params, self.spelling, &self.watch);
+        with(&self.inner, &self.alive, &self.in_txn, move |conn| {
+            // From here the connection is this statement's, so this is
+            // where a signal can start stopping it and where it stops
+            // being able to. A signal that fired first ends the
+            // statement without the engine ever seeing it, which is the
+            // whole point of asking.
+            if let Some(watch) = watch
+                && !watch.enter()
+            {
+                watch.leave();
                 return Err(Failure::Aborted);
             }
-        }
-        Ok((result?, shape))
+            let params: Vec<(&str, Value)> = params
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.clone()))
+                .collect();
+            let shape = Shape::of(conn.session_mut().catalog(), spelling);
+            let result = conn.query_with(statement, &params);
+            if let Some(watch) = watch {
+                watch.leave();
+                // An interrupt is the engine's answer to somebody having
+                // asked, and the only somebody here is the caller's
+                // signal. Reported as an abort rather than as the engine
+                // condition, because a caller who wrote `catch` around a
+                // timeout wants their own reason back and not a
+                // GQLSTATUS.
+                if watch.asked() && matches!(result, Err(ZuError::Interrupted)) {
+                    return Err(Failure::Aborted);
+                }
+            }
+            Ok((result?, shape))
+        })
     }
 
     /// The exception this rejects the caller's promise with.

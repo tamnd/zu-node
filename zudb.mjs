@@ -21,6 +21,7 @@ export const version = zudb.version
 export const abiVersion = zudb.abiVersion
 export const isZuError = zudb.isZuError
 export const Connection = zudb.Connection
+export const Transaction = zudb.Transaction
 export const ZuStream = zudb.ZuStream
 export const ZuCursor = zudb.ZuCursor
 export const ZuDate = zudb.ZuDate

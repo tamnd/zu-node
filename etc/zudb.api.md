@@ -16,10 +16,12 @@ export class Connection {
     cursor(statement: string, params?: Record<string, ZuParam> | null, options?: ZuStreamOptions | null): ZuCursor
     dispose(): Promise<void>
     exec(statement: string, params?: Record<string, ZuParam> | null, options?: ZuStatementOptions | null): Promise<void>
+    get inTransaction(): boolean
     get open(): boolean
     get path(): string
     query<Row = Record<string, ZuValue>>(statement: string, params?: Record<string, ZuParam> | null, options?: ZuStatementOptions | null): Promise<ZuRows<Row>>
     get readOnly(): boolean
+    transaction(options?: ZuTransactionOptions | null): Promise<Transaction>
 }
 
 // @public
@@ -33,6 +35,15 @@ export interface ConnectOptions {
 
 // @public
 export function isZuError(value: unknown): value is ZuError
+
+// @public
+export class Transaction {
+    commit(): Promise<void>
+    dispose(): Promise<void>
+    get done(): boolean
+    get readOnly(): boolean
+    rollback(): Promise<void>
+}
 
 // @public
 export function version(): string
@@ -250,6 +261,11 @@ export class ZuTimestamp {
     offset?: number
     toJSON(): object
     toTemporal(): ZuPlainDateTime | ZuZonedDateTime
+}
+
+// @public
+export interface ZuTransactionOptions {
+    readonly readOnly?: boolean
 }
 
 // @public

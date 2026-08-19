@@ -268,6 +268,11 @@ impl Drop for Borrowed<'_> {
 pub struct Started {
     pub inner: Arc<Mutex<Option<zudb::Connection>>>,
     pub alive: Arc<AtomicBool>,
+    /// Where this statement writes whether the connection is inside a
+    /// transaction now that it has run, which a stream does the same way
+    /// every other statement does even though almost no stream is one of
+    /// the three words that change it.
+    pub in_txn: Arc<AtomicBool>,
     pub statement: String,
     pub params: Vec<(String, Value)>,
     pub spelling: Spelling,
@@ -701,6 +706,10 @@ impl Started {
             None => conn.query_stream(&self.statement, &params, &mut sink),
         };
 
+        self.in_txn.store(
+            borrowed.conn().session_mut().in_transaction(),
+            Ordering::Release,
+        );
         if let Some(guard) = &self.guard {
             guard.leave();
             // An interrupt is the engine's answer to somebody having

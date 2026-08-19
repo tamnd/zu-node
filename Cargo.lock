@@ -1277,7 +1277,7 @@ dependencies = [
 [[package]]
 name = "zu"
 version = "0.0.1"
-source = "git+https://github.com/tamnd/zu?rev=92c9a5e9f1f0d5f4d89bf7321e5710a4fcb861f1#92c9a5e9f1f0d5f4d89bf7321e5710a4fcb861f1"
+source = "git+https://github.com/tamnd/zu?rev=8aa27d9c9df4087522f4314ea5b1d5850df27f8d#8aa27d9c9df4087522f4314ea5b1d5850df27f8d"
 dependencies = [
  "zu-common",
  "zu-encoding",
@@ -1293,7 +1293,7 @@ dependencies = [
 [[package]]
 name = "zu-common"
 version = "0.0.1"
-source = "git+https://github.com/tamnd/zu?rev=92c9a5e9f1f0d5f4d89bf7321e5710a4fcb861f1#92c9a5e9f1f0d5f4d89bf7321e5710a4fcb861f1"
+source = "git+https://github.com/tamnd/zu?rev=8aa27d9c9df4087522f4314ea5b1d5850df27f8d#8aa27d9c9df4087522f4314ea5b1d5850df27f8d"
 dependencies = [
  "thiserror",
 ]
@@ -1301,7 +1301,7 @@ dependencies = [
 [[package]]
 name = "zu-encoding"
 version = "0.0.1"
-source = "git+https://github.com/tamnd/zu?rev=92c9a5e9f1f0d5f4d89bf7321e5710a4fcb861f1#92c9a5e9f1f0d5f4d89bf7321e5710a4fcb861f1"
+source = "git+https://github.com/tamnd/zu?rev=8aa27d9c9df4087522f4314ea5b1d5850df27f8d#8aa27d9c9df4087522f4314ea5b1d5850df27f8d"
 dependencies = [
  "ruzstd",
  "zu-common",
@@ -1310,7 +1310,7 @@ dependencies = [
 [[package]]
 name = "zu-exec"
 version = "0.0.1"
-source = "git+https://github.com/tamnd/zu?rev=92c9a5e9f1f0d5f4d89bf7321e5710a4fcb861f1#92c9a5e9f1f0d5f4d89bf7321e5710a4fcb861f1"
+source = "git+https://github.com/tamnd/zu?rev=8aa27d9c9df4087522f4314ea5b1d5850df27f8d#8aa27d9c9df4087522f4314ea5b1d5850df27f8d"
 dependencies = [
  "zu-common",
  "zu-query",
@@ -1320,7 +1320,7 @@ dependencies = [
 [[package]]
 name = "zu-query"
 version = "0.0.1"
-source = "git+https://github.com/tamnd/zu?rev=92c9a5e9f1f0d5f4d89bf7321e5710a4fcb861f1#92c9a5e9f1f0d5f4d89bf7321e5710a4fcb861f1"
+source = "git+https://github.com/tamnd/zu?rev=8aa27d9c9df4087522f4314ea5b1d5850df27f8d#8aa27d9c9df4087522f4314ea5b1d5850df27f8d"
 dependencies = [
  "crossbeam-deque",
  "zu-common",
@@ -1331,7 +1331,7 @@ dependencies = [
 [[package]]
 name = "zu-s3"
 version = "0.0.1"
-source = "git+https://github.com/tamnd/zu?rev=92c9a5e9f1f0d5f4d89bf7321e5710a4fcb861f1#92c9a5e9f1f0d5f4d89bf7321e5710a4fcb861f1"
+source = "git+https://github.com/tamnd/zu?rev=8aa27d9c9df4087522f4314ea5b1d5850df27f8d#8aa27d9c9df4087522f4314ea5b1d5850df27f8d"
 dependencies = [
  "crc32c",
  "object_store",
@@ -1342,7 +1342,7 @@ dependencies = [
 [[package]]
 name = "zu-sqlite"
 version = "0.0.1"
-source = "git+https://github.com/tamnd/zu?rev=92c9a5e9f1f0d5f4d89bf7321e5710a4fcb861f1#92c9a5e9f1f0d5f4d89bf7321e5710a4fcb861f1"
+source = "git+https://github.com/tamnd/zu?rev=8aa27d9c9df4087522f4314ea5b1d5850df27f8d#8aa27d9c9df4087522f4314ea5b1d5850df27f8d"
 dependencies = [
  "rusqlite",
  "zu-common",
@@ -1352,7 +1352,7 @@ dependencies = [
 [[package]]
 name = "zu-storage"
 version = "0.0.1"
-source = "git+https://github.com/tamnd/zu?rev=92c9a5e9f1f0d5f4d89bf7321e5710a4fcb861f1#92c9a5e9f1f0d5f4d89bf7321e5710a4fcb861f1"
+source = "git+https://github.com/tamnd/zu?rev=8aa27d9c9df4087522f4314ea5b1d5850df27f8d#8aa27d9c9df4087522f4314ea5b1d5850df27f8d"
 dependencies = [
  "zu-common",
  "zu-encoding",
@@ -1361,7 +1361,7 @@ dependencies = [
 [[package]]
 name = "zu-vector"
 version = "0.0.1"
-source = "git+https://github.com/tamnd/zu?rev=92c9a5e9f1f0d5f4d89bf7321e5710a4fcb861f1#92c9a5e9f1f0d5f4d89bf7321e5710a4fcb861f1"
+source = "git+https://github.com/tamnd/zu?rev=8aa27d9c9df4087522f4314ea5b1d5850df27f8d#8aa27d9c9df4087522f4314ea5b1d5850df27f8d"
 dependencies = [
  "zu-common",
 ]
@@ -1369,7 +1369,7 @@ dependencies = [
 [[package]]
 name = "zu-zu1"
 version = "0.0.1"
-source = "git+https://github.com/tamnd/zu?rev=92c9a5e9f1f0d5f4d89bf7321e5710a4fcb861f1#92c9a5e9f1f0d5f4d89bf7321e5710a4fcb861f1"
+source = "git+https://github.com/tamnd/zu?rev=8aa27d9c9df4087522f4314ea5b1d5850df27f8d#8aa27d9c9df4087522f4314ea5b1d5850df27f8d"
 dependencies = [
  "crc32c",
  "loom",
