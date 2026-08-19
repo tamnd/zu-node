@@ -32,6 +32,7 @@ on:
       - .github/workflows/release.yml
       - package.json
       - npm/**
+      - tools/reference.mjs
       - Cargo.toml
       - Cargo.lock
       - rust-toolchain.toml
@@ -216,6 +217,36 @@ jobs:
         with:
           name: packages
           path: npm/
+          if-no-files-found: error
+
+  # The reference, generated from the declarations this release
+  # publishes. It is a job here rather than only a test in CI because a
+  # reference is something a release hands over, and the version it is
+  # about is the version being released.
+  #
+  # It needs a binary for the machine it runs on, because the last thing
+  # the tool does is require the package and hold the names it exports
+  # against the names it documented. That check is the point: the
+  # declarations and the addon are generated from one Rust crate and
+  # published as two files, and the failure worth catching is the one
+  # where they stop agreeing.
+  reference:
+    needs: binary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: binary-x86_64-unknown-linux-gnu
+      - run: npm run reference
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reference
+          path: reference/
           if-no-files-found: error
 
   # Publishing is the one step that cannot be taken back, so it happens
