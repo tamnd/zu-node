@@ -593,6 +593,7 @@ export interface ZuProgressOptions {
  * already been left behind.
  */
 export interface ZuProgress extends Disposable {
+  /** Stops the watch. The callback is not called again. */
   stop(): void
 }
 

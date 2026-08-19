@@ -520,5 +520,14 @@ test('registering costs the same whatever the frame holds', async (t) => {
       best[rows] = Math.min(best[rows], Number(process.hrtime.bigint() - started) / 1e6)
     }
   }
-  assert.ok(best[5_000_000] < 2, `registering 5m rows took ${best[5_000_000].toFixed(2)} ms`)
+  // Against the ten row call rather than against a millisecond count,
+  // because the claim is that the cost does not follow the rows and a
+  // fixed budget measures the machine's load as much as the code: a way
+  // in that walked the rows would be five hundred thousand times the
+  // small frame and not twenty.
+  assert.ok(
+    best[5_000_000] < best[10] * 20 + 2,
+    `registering 5m rows took ${best[5_000_000].toFixed(2)} ms ` +
+      `against ${best[10].toFixed(2)} ms for ten`,
+  )
 })

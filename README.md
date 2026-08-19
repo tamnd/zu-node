@@ -290,6 +290,8 @@ The same memory is on both sides of that: `table.getChild("age").data[0].values`
 
 Two things are not buffers, and both are named by the type rather than found out by looking. A column of nodes, rels, paths, lists or records has no fixed width cell, so it arrives as `items`, holding the same JavaScript values `query` would have made. A column of nothing but nulls has a length and nothing else, because there is nothing to put in a buffer. A column that mixes two types is refused, naming the column and the row that did it, since a columnar result holds one type per column and a column that quietly became strings is worse than one that would not build.
 
+A statement that matched nothing still comes back with its columns, each one the type the plan declared and each one empty: a string column of no rows has its one starting offset, an integer column of no rows has a buffer of no elements. So a table built from an empty answer has the schema the same statement would have had with rows in it, and a loop that concatenates a page at a time does not have to hold the first page that had anything in it as a special case.
+
 `bigIntMode` says nothing here. A columnar read has one physical layout per type and an INT64 column is 64 bit cells however a caller would rather read one, which is the difference between a buffer and a value. The mode still decides what is inside `items`, where this client is making objects anyway.
 
 ## Preparing a statement
