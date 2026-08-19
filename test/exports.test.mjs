@@ -25,6 +25,7 @@ const SURFACE = [
   'Connection',
   'Transaction',
   'Appender',
+  'Prepared',
   'ZuStream',
   'ZuCursor',
   'ZuDate',

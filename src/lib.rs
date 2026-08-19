@@ -24,6 +24,8 @@ mod conn;
 mod error;
 mod frame;
 mod load;
+mod plan;
+mod prepared;
 mod register;
 mod stream;
 mod temporal;

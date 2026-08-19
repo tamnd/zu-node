@@ -24,6 +24,7 @@ export const isZuError = zudb.isZuError
 export const Connection = zudb.Connection
 export const Transaction = zudb.Transaction
 export const Appender = zudb.Appender
+export const Prepared = zudb.Prepared
 export const ZuStream = zudb.ZuStream
 export const ZuCursor = zudb.ZuCursor
 export const ZuDate = zudb.ZuDate

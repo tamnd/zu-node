@@ -53,6 +53,16 @@ declare module './binding.cjs' {
    * caller who meant exactly that.
    */
   interface Appender extends AsyncDisposable {}
+
+  /**
+   * The disposal of a prepared statement, declared here for the same
+   * reason the other three are.
+   *
+   * It closes, which gives the statement back to the connection. There
+   * is nothing to undo and nothing to write, so unlike the other three
+   * this one has only the one thing it could mean.
+   */
+  interface Prepared extends AsyncDisposable {}
 }
 
 /**
