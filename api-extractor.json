@@ -1,0 +1,54 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/api-extractor/v7/api-extractor.schema.json",
+
+  // projectFolder is said out loud because there is no tsconfig.json at
+  // the root to find it by. This package is Rust with a JavaScript face
+  // on it, and the only TypeScript configs it has are the two under
+  // tools and test.
+  "projectFolder": ".",
+
+  // The CommonJS declarations, which are the ones written: the ESM file
+  // re-exports them so that a public API cannot exist in two copies and
+  // drift between them.
+  "mainEntryPointFilePath": "<projectFolder>/zudb.d.cts",
+
+  "compiler": {
+    "tsconfigFilePath": "<projectFolder>/tools/api-extractor.tsconfig.json"
+  },
+
+  // The report is the point of running this at all. etc/zudb.api.md is
+  // committed, CI regenerates it and fails if it moved, and so every
+  // change to what this package exports arrives as a diff somebody has
+  // to read rather than as a line buried in six hundred generated ones.
+  "apiReport": {
+    "enabled": true,
+    "reportFileName": "zudb.api.md",
+    "reportFolder": "<projectFolder>/etc/",
+    "reportTempFolder": "<projectFolder>/temp/"
+  },
+
+  "docModel": { "enabled": false },
+  "dtsRollup": { "enabled": false },
+  "tsdocMetadata": { "enabled": false },
+
+  "messages": {
+    "compilerMessageReporting": {
+      "default": { "logLevel": "warning" }
+    },
+
+    // Release tags and doc comments are not how this package marks what
+    // is public: the exports map is, and everything reachable through
+    // it is public. So the two rules that ask for tags are off and the
+    // one that catches a type leaking out untyped is on.
+    "extractorMessageReporting": {
+      "default": { "logLevel": "warning" },
+      "ae-missing-release-tag": { "logLevel": "none" },
+      "ae-undocumented": { "logLevel": "none" },
+      "ae-forgotten-export": { "logLevel": "error", "addToApiReportFile": true }
+    },
+
+    "tsdocMessageReporting": {
+      "default": { "logLevel": "none" }
+    }
+  }
+}

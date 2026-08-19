@@ -67,11 +67,14 @@
     "test:deno": "deno test --no-check --allow-read --allow-write --allow-env --allow-ffi \"test/*.test.mjs\"",
     "check:types": "tsc --noEmit --project test/types/tsconfig.json",
     "check:package": "attw --pack .",
+    "check:api": "api-extractor run --verbose",
+    "check:api:update": "api-extractor run --local",
     "bench": "node bench/query.mjs",
     "bench:temporal": "node --harmony-temporal bench/query.mjs"
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.2",
+    "@microsoft/api-extractor": "^7.58.12",
     "@napi-rs/cli": "^3.8.6",
     "@types/node": "^26.2.0",
     "typescript": "^5.9.3"

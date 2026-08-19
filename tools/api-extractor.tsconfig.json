@@ -1,0 +1,23 @@
+{
+  "//": [
+    "The compiler settings api-extractor reads the public types with.",
+    "They are the ones in test/types/tsconfig.json, because the report",
+    "is meant to say what a TypeScript user sees and that file is what",
+    "a TypeScript user's compiler does. skipLibCheck is on here and off",
+    "there: this run is a reader rather than a checker, and the checking",
+    "is what the other one is for."
+  ],
+  "compilerOptions": {
+    "module": "node16",
+    "moduleResolution": "node16",
+    "target": "es2023",
+    "lib": ["ES2023", "ESNext.Disposable"],
+    "types": ["node"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "exactOptionalPropertyTypes": true,
+    "noUncheckedIndexedAccess": true
+  },
+  "files": ["../zudb.d.cts"]
+}
