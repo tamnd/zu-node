@@ -1,0 +1,214 @@
+name: Install
+
+# `npm i zudb`, on a machine that has nothing else on it.
+#
+# Every other job in this repository runs on a hosted image, and a
+# hosted image is the least representative computer in the world: it
+# has a compiler, a Rust toolchain, a git, a Python, and a hundred
+# libraries an addon can quietly link to and get away with. The
+# failures that only a user's machine sees are the ones nothing here
+# looks for. A file left out of `files` and loaded out of the checkout
+# instead. An addon linked against a symbol version the build image had
+# and a slim image has not. A platform package whose `os`, `cpu` or
+# `libc` says the wrong thing, so npm installs it where it cannot load
+# and skips it where it would have worked.
+#
+# So this builds the two Linux binaries a release would build and
+# installs what a release would publish, in a container that holds a
+# runtime, a package manager and nothing else. tools/install.mjs is the
+# program it runs there, which is the same one the release workflow
+# runs and for the same reason: it packs the tarballs npm would fetch,
+# installs them into an empty project outside the checkout, and runs a
+# statement through both module formats.
+#
+# Nightly rather than on every push, because what it catches is drift
+# in things outside this repository. A base image whose glibc moved, a
+# musl that went forward, an npm that changed how it reads `libc`. None
+# of that is in a diff anybody here writes, and all of it arrives on its
+# own schedule.
+
+on:
+  schedule:
+    # Late enough that the day's merges are in, and not on the hour,
+    # where every scheduled job on the service is queued behind every
+    # other one.
+    - cron: "41 5 * * *"
+  workflow_dispatch:
+  # The workflow and the program it runs are exercised on the pull
+  # request that changes them, since a nightly that broke is a nightly
+  # nobody reads for a week.
+  pull_request:
+    paths:
+      - .github/workflows/install.yml
+      - tools/install.mjs
+      - tools/platforms.mjs
+      - package.json
+      - npm/**
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # The Node the two build images do not carry. Pinned, like every other
+  # toolchain here, because a build whose tools float is a build nobody
+  # can reproduce on the day it breaks.
+  NODE_VERSION: v24.19.0
+
+jobs:
+  # The two Linux binaries a container can load, built the way the
+  # release builds them and for the same reasons: manylinux_2_28 is the
+  # glibc floor, and an addon linked against the runner's own glibc is
+  # the failure that gets reported as "works on my machine". Release and
+  # not debug, because what is being installed has to be what would be
+  # published.
+  binary:
+    name: ${{ matrix.libc }}
+    runs-on: ubuntu-latest
+    container: ${{ matrix.container }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - libc: gnu
+            target: x86_64-unknown-linux-gnu
+            container: quay.io/pypa/manylinux_2_28_x86_64:2026.08.15-1
+            node: linux-x64
+          - libc: musl
+            target: x86_64-unknown-linux-musl
+            alpine: alpine:3.24.1
+    steps:
+      - uses: actions/checkout@v7
+
+      # The manylinux image carries a compiler for wheels and nothing
+      # for this. The tarball rather than a package, because the image
+      # is RHEL 8 and its Node is older than this package's floor.
+      - name: Node and rustup, inside the image
+        if: matrix.container != ''
+        run: |
+          set -eu
+          curl -fsSL "https://nodejs.org/dist/$NODE_VERSION/node-$NODE_VERSION-${{ matrix.node }}.tar.xz" \
+            | tar -xJ -C /usr/local --strip-components=1
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --no-modify-path --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - uses: Swatinem/rust-cache@v2
+        if: matrix.alpine == ''
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        if: matrix.alpine == ''
+        run: |
+          set -eu
+          npm ci
+          npx napi build --platform --release --js binding.cjs --dts binding.d.cts
+
+      # Alpine builds its own architecture natively, so there is no
+      # target flag. The crt-static override is what makes a shared
+      # object possible at all on musl, whose default is to link the C
+      # runtime statically into everything.
+      - name: Build, inside Alpine
+        if: matrix.alpine != ''
+        run: |
+          docker run --rm -v "$PWD":/work -w /work \
+            -e RUSTFLAGS="-C target-feature=-crt-static" \
+            -e CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=gcc \
+            ${{ matrix.alpine }} sh -c '
+              set -eu
+              apk add --no-cache nodejs npm rustup build-base
+              rustup-init -y --no-modify-path --profile minimal
+              export PATH="$HOME/.cargo/bin:$PATH"
+              npm ci
+              npx napi build --platform --release --js binding.cjs --dts binding.d.cts
+            '
+
+      # One file, named after the platform it runs on, which is what the
+      # loader looks for and what the platform package publishes.
+      - run: node tools/binary.mjs ${{ matrix.target }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.libc }}
+          path: ./*.node
+          if-no-files-found: error
+
+  # And the install, in a container that is the whole point of the job.
+  #
+  # docker run rather than a job container, because a job container has
+  # the runner's own Node mounted into it and half the reason to use a
+  # slim image is that nothing is mounted into it. This way the only
+  # things inside are the image and this checkout.
+  #
+  # Three rows: the version this package requires, the current release,
+  # and musl, which is where a platform package with the wrong `libc` in
+  # it installs anyway and then fails at the require.
+  clean:
+    name: ${{ matrix.image }}
+    needs: binary
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: node:24-slim
+            libc: gnu
+            dir: linux-x64-gnu
+          - image: node:26-slim
+            libc: gnu
+            dir: linux-x64-gnu
+          - image: node:24-alpine
+            libc: musl
+            dir: linux-x64-musl
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          name: binary-${{ matrix.libc }}
+      # Where a release puts it and where npm would fetch it from. The
+      # manifest beside it is committed, so this is the only piece that
+      # is not already in the checkout.
+      - run: mv zudb.${{ matrix.dir }}.node npm/${{ matrix.dir }}/
+      - name: An install, on a machine with only the language runtime
+        run: |
+          docker run --rm -v "$PWD":/work -w /work \
+            -e npm_config_offline=true \
+            ${{ matrix.image }} sh -c '
+              set -eu
+              # What the image is claimed to be, checked rather than
+              # believed, because the day a base image starts shipping a
+              # compiler is the day this job silently stops being about
+              # anything. node-gyp is named too: an install that falls
+              # back to building from source is an install this package
+              # promises never happens.
+              for tool in cc gcc clang rustc cargo make git python3 node-gyp; do
+                if command -v "$tool" >/dev/null 2>&1; then
+                  echo "this image has $tool on it, so it is not the machine this job is about"
+                  exit 1
+                fi
+              done
+              node tools/install.mjs
+            '
+      # The gate is validated the only way a gate can be: the failure it
+      # exists to catch has to fail it. The binary taken back out is what
+      # a platform package that did not build, did not upload or did not
+      # install looks like from in here. It is also the check that this
+      # job is running the program at all, since a bind mount pointing at
+      # nothing and a container whose exit code went nowhere both look
+      # exactly like success.
+      - name: The failure the job is meant to catch, caught
+        run: |
+          mv npm/${{ matrix.dir }}/zudb.${{ matrix.dir }}.node /tmp/
+          set +e
+          docker run --rm -v "$PWD":/work -w /work \
+            -e npm_config_offline=true \
+            ${{ matrix.image }} node tools/install.mjs
+          rc=$?
+          set -e
+          mv /tmp/zudb.${{ matrix.dir }}.node npm/${{ matrix.dir }}/
+          test $rc -ne 0 || { echo "the install passed with no binary in the platform package"; exit 1; }
