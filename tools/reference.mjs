@@ -32,6 +32,14 @@ import { Application, ReflectionKind, TSConfigReader } from 'typedoc'
 
 const root = new URL('../', import.meta.url)
 
+// An entry point is a glob, and in a glob a backslash escapes whatever
+// comes after it. So on Windows the path this file computes for its own
+// sibling is read as `zudb.d.cts` with three escapes in it, matches
+// nothing, and typedoc says so and carries on to generate an empty
+// reference. Separators forward, which is what typedoc asks for and what
+// every path option here takes on either platform.
+const posix = (url) => fileURLToPath(url).replaceAll('\\', '/')
+
 // The members `zudb.cjs` puts on the native class from JavaScript,
 // which is where anything with a generator or a symbol for a name has
 // to live: the class is registered by the addon and there is nowhere in
@@ -44,8 +52,8 @@ const AUGMENTED = ['stream', '[asyncDispose]']
 async function build(into) {
   const app = await Application.bootstrapWithPlugins(
     {
-      entryPoints: [fileURLToPath(new URL('zudb.d.cts', root))],
-      tsconfig: fileURLToPath(new URL('tools/api-extractor.tsconfig.json', root)),
+      entryPoints: [posix(new URL('zudb.d.cts', root))],
+      tsconfig: posix(new URL('tools/api-extractor.tsconfig.json', root)),
       // The declarations are read rather than checked. Checking them is
       // what `npm run check:types` is for, against the tsconfig a user's
       // own compiler would use, and a generator that also type-checks is
@@ -59,6 +67,11 @@ async function build(into) {
   )
   const project = await app.convert()
   if (!project) throw new Error('typedoc read the declarations and made nothing of them')
+  // A file it could not find is an error it prints and then carries on
+  // from, with a project that has nothing in it. The complaints below
+  // would report that as thirteen missing pages, which is a true answer
+  // to the wrong question, so it is said here in one line instead.
+  if (app.logger.hasErrors()) throw new Error('typedoc reported an error, so what is above it is not a reference')
   await app.generateDocs(project, into)
   return project
 }
