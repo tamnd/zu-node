@@ -14,6 +14,13 @@
 //! holds the mutex for as long as it runs, and two statements that
 //! should overlap want two connections. It is there so that a program
 //! which shares one by accident waits rather than corrupts.
+//!
+//! Waits, except behind a stream. A stream ends when its reader says
+//! so, so a statement that queued behind a half-read one would be
+//! waiting for the caller who is waiting for it, and a program that
+//! stops is worse than a program that is told no. A stream takes the
+//! connection out of the slot instead of locking it, and the next
+//! statement finds the slot empty and says [`STREAMING`].
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -113,15 +120,24 @@ pub struct Connection {
 /// Creates one when the path holds nothing, which is what a first
 /// program expects and what every embedded database does. A read-only
 /// connection never creates anything.
-#[napi(ts_return_type = "Promise<Connection>")]
-pub fn connect(env: &Env, path: String, options: Option<ConnectOptions>) -> AsyncTask<ConnectTask> {
+#[napi(
+    ts_args_type = "path: string, options?: ConnectOptions | undefined | null",
+    ts_return_type = "Promise<Connection>"
+)]
+pub fn connect(
+    env: &Env,
+    path: Unknown<'_>,
+    options: Option<ConnectOptions>,
+) -> AsyncTask<ConnectTask> {
     // Whether this runtime has `Temporal` is a question only the thread
     // that owns the runtime may ask, so it is asked here and carried to
     // the thread that opens the database, where the answer decides
     // whether there is anything to open.
     let has_temporal = temporal::present(env).unwrap_or(false);
+    let path = text(&path, "path");
     AsyncTask::new(ConnectTask {
-        path,
+        path: path.as_deref().unwrap_or_default().to_string(),
+        refused: path.err(),
         options,
         has_temporal,
     })
@@ -129,6 +145,8 @@ pub fn connect(env: &Env, path: String, options: Option<ConnectOptions>) -> Asyn
 
 pub struct ConnectTask {
     path: String,
+    /// What this client refused the call with, before any of it ran.
+    refused: Option<String>,
     options: Option<ConnectOptions>,
     has_temporal: bool,
 }
@@ -138,6 +156,12 @@ impl<'task> ScopedTask<'task> for ConnectTask {
     type JsValue = ClassInstance<'task, Connection>;
 
     fn compute(&mut self) -> Result<Self::Output> {
+        // Before anything else, because a path that is not a path names
+        // no file to open and a message about the one it made instead
+        // would be a message about this client's own confusion.
+        if let Some(message) = self.refused.take() {
+            return Ok(Err(Failure::Usage(message)));
+        }
         let read_only = self
             .options
             .as_ref()
@@ -290,8 +314,8 @@ impl Connection {
     pub fn query(
         &self,
         env: &Env,
-        statement: String,
-        params: Option<Object<'_>>,
+        statement: Unknown<'_>,
+        params: Option<Unknown<'_>>,
         options: Option<Object<'_>>,
     ) -> AsyncTask<QueryTask> {
         AsyncTask::new(self.task(env, statement, params, options))
@@ -309,8 +333,8 @@ impl Connection {
     pub fn exec(
         &self,
         env: &Env,
-        statement: String,
-        params: Option<Object<'_>>,
+        statement: Unknown<'_>,
+        params: Option<Unknown<'_>>,
         options: Option<Object<'_>>,
     ) -> AsyncTask<ExecTask> {
         AsyncTask::new(ExecTask(self.task(env, statement, params, options)))
@@ -329,8 +353,8 @@ impl Connection {
     pub fn cursor(
         &self,
         env: &Env,
-        statement: String,
-        params: Option<Object<'_>>,
+        statement: Unknown<'_>,
+        params: Option<Unknown<'_>>,
         options: Option<Object<'_>>,
     ) -> ZuCursor {
         // Read here rather than on the statement's thread, because
@@ -338,9 +362,11 @@ impl Connection {
         // owns the runtime may do. So is adding the listener the signal
         // is watched through.
         let bound = if self.alive.load(Ordering::Acquire) {
-            self.spell(options.as_ref()).and_then(|spelling| {
+            text(&statement, "statement").and_then(|statement| {
+                let spelling = self.spell(options.as_ref())?;
                 let batch_rows = batch_rows(options.as_ref())?;
                 Ok((
+                    statement,
                     bind(env, params)?,
                     spelling,
                     batch_rows,
@@ -350,11 +376,18 @@ impl Connection {
         } else {
             Err(CLOSED.to_string())
         };
-        let (params, spelling, batch_rows, watch, refused) = match bound {
-            Ok((params, spelling, batch_rows, watch)) => {
-                (params, spelling, batch_rows, watch, None)
+        let (statement, params, spelling, batch_rows, watch, refused) = match bound {
+            Ok((statement, params, spelling, batch_rows, watch)) => {
+                (statement, params, spelling, batch_rows, watch, None)
             }
-            Err(message) => (Vec::new(), self.spelling, None, None, Some(message)),
+            Err(message) => (
+                String::new(),
+                Vec::new(),
+                self.spelling,
+                None,
+                None,
+                Some(message),
+            ),
         };
         stream::open(
             Started {
@@ -382,8 +415,8 @@ impl Connection {
     fn task(
         &self,
         env: &Env,
-        statement: String,
-        params: Option<Object<'_>>,
+        statement: Unknown<'_>,
+        params: Option<Unknown<'_>>,
         options: Option<Object<'_>>,
     ) -> QueryTask {
         // The parameters are read here rather than on the threadpool
@@ -391,8 +424,10 @@ impl Connection {
         // the thread that owns the runtime may do. So is adding the
         // listener the signal is watched through.
         let bound = if self.alive.load(Ordering::Acquire) {
-            self.spell(options.as_ref()).and_then(|spelling| {
+            text(&statement, "statement").and_then(|statement| {
+                let spelling = self.spell(options.as_ref())?;
                 Ok((
+                    statement,
                     bind(env, params)?,
                     spelling,
                     watch(env, options, self.interrupt.clone())?,
@@ -401,12 +436,19 @@ impl Connection {
         } else {
             Err(CLOSED.to_string())
         };
-        let (params, spelling, watch, refused) = match bound {
-            Ok((params, spelling, watch)) => (params, spelling, watch, None),
-            Err(message) => (Vec::new(), self.spelling, None, Some(message)),
+        let (statement, params, spelling, watch, refused) = match bound {
+            Ok((statement, params, spelling, watch)) => (statement, params, spelling, watch, None),
+            Err(message) => (
+                String::new(),
+                Vec::new(),
+                self.spelling,
+                None,
+                Some(message),
+            ),
         };
         QueryTask {
             inner: Arc::clone(&self.inner),
+            alive: Arc::clone(&self.alive),
             statement,
             params,
             spelling,
@@ -504,6 +546,18 @@ impl From<ZuError> for Failure {
 /// What a closed connection says, wherever it is noticed.
 pub(crate) const CLOSED: &str =
     "the connection is closed, so there is nothing left to run a statement on";
+
+/// What a connection a stream is still reading says to the next
+/// statement.
+///
+/// A connection runs one statement at a time, and a stream is a
+/// statement that ends when its reader says so. So a second statement
+/// issued while a stream is outstanding cannot be made to wait: the
+/// thing it would wait for is the caller, who is waiting for it. That is
+/// a program that stops, which is the worst answer a database can give,
+/// and this is the sentence that replaces it.
+pub(crate) const STREAMING: &str = "a stream on this connection has not finished, and a connection runs one statement at a time: \
+     read the stream to the end, cancel it, or open a second connection";
 
 /// What an abort says when the signal that fired named no reason of its
 /// own, which is a signal built by hand rather than by a runtime.
@@ -610,6 +664,41 @@ fn int_mode(options: Option<&Object<'_>>, connection: Ints) -> std::result::Resu
     }
 }
 
+/// Reads an argument that has to be a string, and says what arrived
+/// instead.
+///
+/// napi refuses the wrong type on its own, and what it refuses with is
+/// `Failed to convert JavaScript value \`Number 42 \` into rust type
+/// \`String\``, thrown out of the call with a `code` of `StringExpected`
+/// rather than handed to the promise the caller is awaiting. Both
+/// halves of that are wrong for this client: the message describes this
+/// crate's insides to somebody who mistyped a variable, and a throw
+/// from a method whose every other failure is a rejection is a method
+/// callers have to wrap twice. So the argument arrives unread and this
+/// is what reads it.
+fn text(value: &Unknown<'_>, what: &str) -> std::result::Result<String, String> {
+    match value.get_type().map_err(|err| err.reason)? {
+        ValueType::String => String::from_unknown(*value).map_err(|err| err.reason),
+        other => Err(format!(
+            "the {what} is {}, and a {what} is a string",
+            worded(other)
+        )),
+    }
+}
+
+/// What arrived, in the words a person writing JavaScript uses for it.
+///
+/// `a Undefined` is what the type's own name gives, and the two values
+/// that need this are exactly the two a mistake produces most: a
+/// variable that was never set and a lookup that found nothing.
+fn worded(kind: ValueType) -> String {
+    match kind {
+        ValueType::Undefined => "undefined".to_string(),
+        ValueType::Null => "null".to_string(),
+        other => format!("a {other}"),
+    }
+}
+
 /// Reads the parameter object into the values the engine binds.
 ///
 /// Every failure comes back as the message to refuse the call with,
@@ -618,11 +707,36 @@ fn int_mode(options: Option<&Object<'_>>, connection: Ints) -> std::result::Resu
 /// would rather hear it as a rejection than as a throw.
 pub(crate) fn bind(
     env: &Env,
-    params: Option<Object<'_>>,
+    params: Option<Unknown<'_>>,
 ) -> std::result::Result<Vec<(String, Value)>, String> {
     let Some(params) = params else {
         return Ok(Vec::new());
     };
+    // An argument of the wrong shape is refused rather than read for
+    // whatever keys it happens to have. An array read as an object
+    // binds its parameters as `0` and `1`, a string binds one per
+    // character, and both of those are a statement that runs with none
+    // of the values the caller passed and answers nothing.
+    match params.get_type().map_err(|err| err.reason)? {
+        ValueType::Undefined | ValueType::Null => return Ok(Vec::new()),
+        ValueType::Object => {}
+        other => {
+            return Err(format!(
+                "the parameters are {}, and parameters are an object keyed by the names the \
+                 statement uses, without the $",
+                worded(other)
+            ));
+        }
+    }
+    let params = Object::from_unknown(params).map_err(|err| err.reason)?;
+    if params.is_array().map_err(|err| err.reason)? {
+        return Err(
+            "the parameters are an array, and zu names its parameters rather than \
+                    numbering them: pass an object keyed by the names the statement uses, without \
+                    the $"
+                .to_string(),
+        );
+    }
     let mut bound = Vec::new();
     for name in Object::keys(&params).map_err(|err| err.reason)? {
         let value: Unknown<'_> = params
@@ -636,6 +750,9 @@ pub(crate) fn bind(
 
 pub struct QueryTask {
     inner: Arc<Mutex<Option<zudb::Connection>>>,
+    /// Whether the connection is still open, which is what tells an
+    /// empty slot that was closed from one a stream is holding.
+    alive: Arc<AtomicBool>,
     statement: String,
     params: Vec<(String, Value)>,
     /// How this statement spells the values it gives back.
@@ -669,9 +786,17 @@ impl QueryTask {
             }
         };
         // Closed between the call and the thread picking it up, which is
-        // a race the caller cannot see and this has to check anyway.
+        // a race the caller cannot see and this has to check anyway. Or
+        // lent to a stream that has not finished, which is the same
+        // empty slot and a different thing to say about it.
         let Some(conn) = held.as_mut() else {
-            return Err(Failure::Usage(CLOSED.to_string()));
+            return Err(Failure::Usage(
+                match self.alive.load(Ordering::Acquire) {
+                    true => STREAMING,
+                    false => CLOSED,
+                }
+                .to_string(),
+            ));
         };
         // From here the connection is this statement's, so this is where
         // a signal can start stopping it and where it stops being able

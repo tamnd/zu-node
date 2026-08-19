@@ -91,6 +91,133 @@ jobs:
       - run: npm run test:temporal
         if: matrix.node == 24
 
+  # The same suite again, over an addon built with AddressSanitizer.
+  #
+  # There is no `unsafe` in this crate, which is the reason to run this
+  # rather than the reason not to: what a binding gets wrong is not
+  # arithmetic on a raw pointer but a handle used after the scope that
+  # owned it closed, a buffer read on a thread the runtime had already
+  # taken back, an engine allocation freed on one side of the boundary
+  # and touched from the other. None of those are `unsafe` blocks here
+  # and every one of them is a use-after-free somewhere, which is the
+  # thing this tool exists to find.
+  #
+  # ASan's runtime has to be loaded before anything it instruments, and
+  # the addon is opened by `require` long after node has started, so it
+  # is preloaded rather than linked: `-Zexternal-clangrt` tells rustc
+  # not to bundle its own copy, and LD_PRELOAD supplies clang's. The
+  # path is asked for rather than written down, because it moves with
+  # the LLVM version the image ships. Leak detection is off here and
+  # the job below is where it lives, since ASan and LSan report the
+  # same run twice and a report that arrives in two jobs is a report
+  # nobody can attribute.
+  sanitizer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - uses: Swatinem/rust-cache@v2
+      # The instrumented build is nightly, because `-Zsanitizer` is,
+      # and it is the only thing here that is: what ships is built by
+      # the pinned compiler in every other job.
+      - run: rustup toolchain install nightly --profile minimal
+      - run: sudo apt-get update && sudo apt-get install -y libclang-rt-18-dev
+      - run: npm ci
+      - name: The addon, instrumented
+        env:
+          RUSTUP_TOOLCHAIN: nightly
+          RUSTFLAGS: -Zsanitizer=address -Zexternal-clangrt
+          CC: clang
+          CXX: clang++
+        run: npm run build:debug
+      - name: The suite, watched
+        run: |
+          runtime=$(clang -print-file-name=libclang_rt.asan-$(uname -m).so)
+          test -f "$runtime"
+          LD_PRELOAD="$runtime" ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 \
+            npm test
+
+  # The third tool over the same suite, and the one that watches what
+  # the sanitizer cannot. ASan instruments the source it compiles, so
+  # it sees nothing node itself does with the memory it hands the
+  # addon; Valgrind instruments the instructions that run, so both
+  # sides of the boundary are watched and so is every prebuilt thing
+  # either of them links. It also reports a read of memory nobody
+  # wrote, which ASan does not look for at all.
+  #
+  # Definite leaks only, and for the reason a Rust process always gives:
+  # one-time allocations held at exit are still reachable and not lost,
+  # and counting those would fire this gate on every run and teach
+  # everyone to ignore it. --error-exitcode is what makes a report a
+  # failure rather than something in a log nobody opens.
+  #
+  # tools/valgrind.supp is three lines of rule and says what it leaves
+  # out. It exists because which node this runs on decides what leaks: a
+  # node linked against the system OpenSSL needs nothing suppressed, and
+  # the one the hosted images install has OpenSSL inside it and holds
+  # twenty four bytes of compression table forever. The rule names the
+  # binary that allocated rather than the leak that was reported, which
+  # is what stops it growing a line every bad week.
+  #
+  # --jitless turns V8's compilers off, and it is here so that the
+  # uninitialised-value check can stay on. Maglev branches on memory
+  # nobody wrote while it compiles, on a thread of its own, and reports
+  # it from inside the node binary a dozen frames from anything this
+  # package wrote. Suppressing that would mean suppressing a whole class
+  # of error inside node, and that class is the one worth having: an
+  # addon that hands a half-filled buffer back is exactly what this tool
+  # sees and ASan does not. The flag is --jitless and not --no-opt
+  # because --no-opt left Maglev on and the job stayed red: the tiers
+  # have their own switches now and naming them one by one is a list
+  # that goes stale the next time V8 grows one. --jitless is the flag
+  # that cannot be partially true. The suite runs it in ten seconds
+  # against a job that is already fifty times slower than the real
+  # thing, so it costs nothing it was measuring.
+  leaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y valgrind
+      - run: npm ci
+      # An ordinary build. Valgrind wants the instructions the addon
+      # actually ships, and an instrumented one would be a different
+      # program with a different allocator underneath it.
+      - run: npm run build:debug
+      # The gate is validated the only way a gate can be: a deliberate
+      # leak has to fail it, and it has to be a leak of the shape being
+      # looked for, out of a shared object node loaded rather than out
+      # of node. Preloaded rather than required, because a real napi
+      # module is a lot of code to write for four thousand bytes and
+      # nothing about the check needs node to have called it.
+      - name: A leak the job is meant to catch, caught
+        run: |
+          cat > /tmp/leak.c <<'EOF'
+          #include <stdlib.h>
+          __attribute__((constructor)) static void leak(void) {
+            void *lost = malloc(4096);
+            (void)lost;
+          }
+          EOF
+          cc -shared -fPIC -o /tmp/leak.so /tmp/leak.c
+          set +e
+          LD_PRELOAD=/tmp/leak.so valgrind --error-exitcode=1 --leak-check=full \
+            --show-leak-kinds=definite --errors-for-leak-kinds=definite \
+            --suppressions=tools/valgrind.supp -q \
+            node --jitless -e ''
+          test $? -eq 1 || { echo "the leak gate did not fire on a leak"; exit 1; }
+      - name: The suite, counted
+        run: |
+          valgrind --error-exitcode=1 --leak-check=full \
+            --show-leak-kinds=definite --errors-for-leak-kinds=definite \
+            --suppressions=tools/valgrind.supp -q \
+            node --jitless --test "test/*.test.mjs"
+
   # Bun and Deno run the same suite over the same binary, because the
   # binary is the same one: N-API is the ABI all three implement, and a
   # runtime this package claims and nothing runs on is a runtime this
@@ -112,7 +239,13 @@ jobs:
       - run: npm run build:debug
       # `bun test` and not `bun run`, because the tests are written
       # against `node:test` and Bun's shim for it refuses to register a
-      # test outside its own runner.
+      # test outside its own runner. The shim brings Bun's own five
+      # second per-test timeout with it, which node does not have and
+      # two of these tests do not fit inside: they build a table of
+      # sixty thousand people so that a stream has something to be
+      # faster than, and the build alone is most of five seconds on a
+      # shared runner. `--timeout` puts the limit where it catches a
+      # hang rather than a fixture.
       - run: npm run test:bun
 
   deno:

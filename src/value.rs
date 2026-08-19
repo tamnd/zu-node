@@ -731,6 +731,28 @@ fn as_class(env: &Env, value: Temporal) -> Result<Unknown<'_>> {
 /// apart from a boundary failure and turns it into the rejection the
 /// caller is already awaiting.
 pub fn from_js(env: &Env, name: &str, value: Unknown<'_>) -> Result<Value> {
+    nested(env, name, value, 0)
+}
+
+/// How deep a parameter may nest before this stops reading it.
+///
+/// A list of lists of records is a value somebody meant to send, and a
+/// value that contains itself is a call that would otherwise walk until
+/// the stack ran out and take the process with it. There is no depth
+/// between the two that anybody writes on purpose, so the limit is set
+/// where a real value never reaches and a cycle always does.
+const DEEP: usize = 64;
+
+fn nested(env: &Env, name: &str, value: Unknown<'_>, depth: usize) -> Result<Value> {
+    if depth > DEEP {
+        return Err(Error::new(
+            Status::InvalidArg,
+            format!(
+                "parameter {name} nests deeper than {DEEP}, which is what a value that contains \
+                 itself looks like"
+            ),
+        ));
+    }
     match value.get_type()? {
         ValueType::Null | ValueType::Undefined => Ok(Value::Null),
         ValueType::Boolean => Ok(Value::Bool(bool::from_unknown(value)?)),
@@ -761,7 +783,7 @@ pub fn from_js(env: &Env, name: &str, value: Unknown<'_>) -> Result<Value> {
                 Ok(Value::Float(n))
             }
         }
-        ValueType::Object => from_object(env, name, value),
+        ValueType::Object => from_object(env, name, value, depth),
         other => Err(Error::new(
             Status::InvalidArg,
             format!("parameter {name} is a {other}, which is not a value a statement can hold"),
@@ -769,7 +791,7 @@ pub fn from_js(env: &Env, name: &str, value: Unknown<'_>) -> Result<Value> {
     }
 }
 
-fn from_object(env: &Env, name: &str, value: Unknown<'_>) -> Result<Value> {
+fn from_object(env: &Env, name: &str, value: Unknown<'_>, depth: usize) -> Result<Value> {
     if let Some(temporal) = temporal_from(env, &value)? {
         return Ok(Value::Temporal(temporal));
     }
@@ -779,7 +801,7 @@ fn from_object(env: &Env, name: &str, value: Unknown<'_>) -> Result<Value> {
         let mut items = Vec::with_capacity(len as usize);
         for ix in 0..len {
             let item: Unknown<'_> = object.get_element(ix)?;
-            items.push(from_js(env, name, item)?);
+            items.push(nested(env, name, item, depth + 1)?);
         }
         return Ok(Value::List(items));
     }
@@ -796,7 +818,7 @@ fn from_object(env: &Env, name: &str, value: Unknown<'_>) -> Result<Value> {
     let mut fields = Vec::new();
     for key in Object::keys(&object)? {
         let field: Unknown<'_> = object.get_named_property(key.as_str())?;
-        fields.push((key, from_js(env, name, field)?));
+        fields.push((key, nested(env, name, field, depth + 1)?));
     }
     Ok(Value::record(fields))
 }
