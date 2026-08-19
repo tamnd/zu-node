@@ -3,6 +3,10 @@ target/
 node_modules/
 dist/
 
+# Where api-extractor writes the report it just produced, before it is
+# compared against the one in etc/ that is committed.
+temp/
+
 # The built addon, which napi drops into the source tree so that the
 # tests load the same file a published package would.
 *.node
