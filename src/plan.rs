@@ -47,7 +47,7 @@ use zudb::query::Value;
 use zudb::{OpProfile, PlanNode, Profile, QueryPlan, StageProfile, ZuError};
 
 use crate::cancel::Watch;
-use crate::conn::{Failure, Handles, failed, with};
+use crate::conn::{Failure, Handles, began, failed, with};
 
 /// Compiling a statement to see what it would do.
 pub struct PlanTask {
@@ -136,7 +136,9 @@ impl<'task> ScopedTask<'task> for ProfileTask {
             move |conn| {
                 // A profile is a run, so it is stoppable exactly the way
                 // a run is: the signal is entered when the connection
-                // becomes this call's and left when it stops being.
+                // becomes this call's and left when it stops being, and
+                // the row counter starts again the way it does for one.
+                began(conn);
                 if let Some(watch) = watch
                     && !watch.enter()
                 {

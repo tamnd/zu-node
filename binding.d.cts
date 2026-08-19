@@ -570,6 +570,33 @@ export interface ZuProfile {
 }
 
 /**
+ * What a watch on a running statement takes.
+ */
+export interface ZuProgressOptions {
+  /**
+   * How long to wait between looks, in milliseconds. A tenth of a
+   * second by default, which is about where a person stops reading a
+   * number and starts seeing it move.
+   *
+   * What one look costs is an atomic read, so this is a question about
+   * how often the callback should run rather than about how much the
+   * watch costs the statement.
+   */
+  readonly everyMs?: number
+}
+
+/**
+ * A watch on a running statement, which is stopped by `stop()` or by
+ * leaving the scope of a `using`.
+ *
+ * Stopping twice does nothing, and so does stopping one that has
+ * already been left behind.
+ */
+export interface ZuProgress extends Disposable {
+  stop(): void
+}
+
+/**
  * What a streamed statement takes beside its parameters.
  */
 export interface ZuStreamOptions extends ZuStatementOptions {
@@ -827,6 +854,28 @@ export declare class Connection {
    * atomic.
    */
   get inTransaction(): boolean
+  /**
+   * How many rows the statement running on this connection has read
+   * out of storage, for showing a person that something is
+   * happening.
+   *
+   * Rows read rather than rows answered, because the statement
+   * somebody is waiting on is exactly the one that reads a hundred
+   * million rows to answer one. It starts at zero at each statement
+   * and holds its last value once one ends.
+   *
+   * This is the one thing on a connection that is worth reading
+   * while a statement runs, and it is answered the way
+   * [`Connection::open`] is: an atomic beside the lock rather than a
+   * question through it. So the loop's thread gets its answer while
+   * the threadpool thread is still scanning, and `progress()` is the
+   * timer written around it.
+   *
+   * A number rather than a bigint, like every other count this
+   * client makes rather than reads out of a column: a statement that
+   * had read 2^53 rows would have been running for weeks.
+   */
+  get rowsRead(): number
   /**
    * Starts a transaction and hands it back.
    *

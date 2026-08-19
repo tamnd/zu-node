@@ -479,6 +479,30 @@ impl Connection {
         self.in_txn.load(Ordering::Acquire)
     }
 
+    /// How many rows the statement running on this connection has read
+    /// out of storage, for showing a person that something is
+    /// happening.
+    ///
+    /// Rows read rather than rows answered, because the statement
+    /// somebody is waiting on is exactly the one that reads a hundred
+    /// million rows to answer one. It starts at zero at each statement
+    /// and holds its last value once one ends.
+    ///
+    /// This is the one thing on a connection that is worth reading
+    /// while a statement runs, and it is answered the way
+    /// [`Connection::open`] is: an atomic beside the lock rather than a
+    /// question through it. So the loop's thread gets its answer while
+    /// the threadpool thread is still scanning, and `progress()` is the
+    /// timer written around it.
+    ///
+    /// A number rather than a bigint, like every other count this
+    /// client makes rather than reads out of a column: a statement that
+    /// had read 2^53 rows would have been running for weeks.
+    #[napi(getter)]
+    pub fn rows_read(&self) -> f64 {
+        self.interrupt.rows() as f64
+    }
+
     /// Starts a transaction and hands it back.
     ///
     /// It starts here rather than at the first statement inside it, so a
@@ -1150,6 +1174,24 @@ pub(crate) fn with<T>(
     answered
 }
 
+/// A statement is about to run, and the counter it reports its rows
+/// through starts again at zero.
+///
+/// Called where the connection becomes one statement's, which is the
+/// only moment the count can be reset without racing the statement
+/// reading it: the lock is held here and the reader is a getter that
+/// takes no lock at all. Held rather than cleared afterwards, so that
+/// `rowsRead` after a statement is what that statement cost.
+///
+/// The word an interrupt is raised through is put down by the same
+/// call, which is the reason this happens before the signal is entered
+/// rather than after: a signal that fired while nothing was running
+/// raised nothing to put down, and one that fires from here on is
+/// answered by the watch instead.
+pub(crate) fn began(conn: &mut zudb::Connection) {
+    conn.interrupt().clear();
+}
+
 /// What a closed connection says, wherever it is noticed.
 pub(crate) const CLOSED: &str =
     "the connection is closed, so there is nothing left to run a statement on";
@@ -1470,6 +1512,7 @@ impl QueryTask {
             // being able to. A signal that fired first ends the
             // statement without the engine ever seeing it, which is the
             // whole point of asking.
+            began(conn);
             if let Some(watch) = watch
                 && !watch.enter()
             {

@@ -139,6 +139,72 @@ Object.defineProperty(binding.Connection.prototype, 'stream', {
 })
 
 /**
+ * How often a watch looks, in milliseconds, when the caller does not
+ * say.
+ *
+ * A tenth of a second is about where a person stops reading a number
+ * and starts seeing it move, and ten reads of an atomic a second is
+ * nothing beside a statement worth watching.
+ */
+const EVERY_MS = 100
+
+/**
+ * `conn.progress(...)`, the other method of the native class written in
+ * JavaScript.
+ *
+ * A statement runs on a threadpool thread and the loop is free while it
+ * does, which is what makes a timer the whole of this: `rowsRead` is an
+ * atomic read beside the connection's lock, so asking ten times a
+ * second costs the statement nothing and never queues behind it. There
+ * is no callback into JavaScript from the thread doing the scanning
+ * anywhere in here, which is deliberate, since that would mean a thread
+ * safe function and a scan that stops to talk to the loop.
+ *
+ * On the prototype for the reason `stream` is: the class is registered
+ * by the addon, and this is JavaScript.
+ */
+Object.defineProperty(binding.Connection.prototype, 'progress', {
+  value: function progress(onRows, options) {
+    if (typeof onRows !== 'function') {
+      throw new TypeError(`progress wants a function to call, and ${typeof onRows} is not one`)
+    }
+    const everyMs = options?.everyMs ?? EVERY_MS
+    if (typeof everyMs !== 'number' || !Number.isFinite(everyMs) || everyMs <= 0) {
+      throw new RangeError(
+        `everyMs is how long to wait between looks, and ${everyMs} is not a number of milliseconds`,
+      )
+    }
+    // A timer's delay is a signed 32 bit number of milliseconds, and a
+    // bigger one wraps round to a millisecond with a warning, which is
+    // the opposite of what somebody asking for a long wait asked for.
+    const wait = Math.min(everyMs, 2 ** 31 - 1)
+
+    const conn = this
+    // Where the count already was, so that a watch on an idle
+    // connection says nothing at all: the callback is for a number that
+    // moved, and the number a finished statement left behind is not
+    // one. It is also what keeps a watch nobody stopped from calling
+    // ten times a second forever.
+    let last = conn.rowsRead
+    const timer = setInterval(() => {
+      const rows = conn.rowsRead
+      if (rows === last) return
+      last = rows
+      onRows(rows)
+    }, wait)
+    // A progress bar is not a reason for a program to stay running, and
+    // a watch that outlived what it was watching would otherwise be
+    // exactly that.
+    timer.unref?.()
+
+    const stop = () => clearInterval(timer)
+    return { stop, [Symbol.dispose]: stop }
+  },
+  writable: true,
+  configurable: true,
+})
+
+/**
  * Whether a caught value is a failure from this client.
  *
  * A `catch` in TypeScript gives you `unknown`, and this is the guard
