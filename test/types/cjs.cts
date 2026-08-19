@@ -7,6 +7,7 @@ import {
   isZuError,
   ZuTimestamp,
   type ZuAppendValue,
+  type ZuArrowTable,
   type ZuParam,
   type ZuStream,
   type ZuTransactionOptions,
@@ -83,6 +84,19 @@ export async function bulk(path: string, batch: readonly ZuAppendValue[][]): Pro
     return await rows.flush()
   } finally {
     if (!rows.closed) await rows.close()
+    conn.close()
+  }
+}
+
+export async function scanned(path: string, table: ZuArrowTable): Promise<string[]> {
+  // A table is taken by shape rather than by class, so a caller holding
+  // an `apache-arrow` Table passes it here without this package having
+  // any opinion about which version of that package they installed.
+  const conn = await connect(path)
+  try {
+    await conn.register('frame', table)
+    return await conn.registered()
+  } finally {
     conn.close()
   }
 }

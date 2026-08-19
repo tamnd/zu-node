@@ -152,6 +152,76 @@ export type ZuAppendValue =
   | ZuTemporalValue
 
 /**
+ * One value of a registered frame's column, when the column is written
+ * as a plain array.
+ *
+ * The same values an appender takes, without the bytes: a column of
+ * BYTES is a column no statement can read back yet, so registering one
+ * would be naming data the caller cannot get at. There is no `null`
+ * either, for the reason there is none in a row of an appender.
+ */
+export type ZuFrameValue =
+  | boolean
+  | number
+  | bigint
+  | string
+  | ZuDate
+  | ZuTime
+  | ZuTimestamp
+  | ZuDuration
+  | ZuTemporalValue
+
+/**
+ * One column of a registered frame.
+ *
+ * A typed array is the shape that costs nothing: the engine reads it
+ * where it lies and no byte of it is copied. A plain array is read into
+ * buffers of this client's own, because an array holds values of the
+ * runtime rather than numbers, and its first value settles what the
+ * column holds.
+ */
+export type ZuFrameColumn =
+  | Int8Array
+  | Uint8Array
+  | Uint8ClampedArray
+  | Int16Array
+  | Uint16Array
+  | Int32Array
+  | Uint32Array
+  | Float32Array
+  | Float64Array
+  | BigInt64Array
+  | BigUint64Array
+  | readonly ZuFrameValue[]
+
+/**
+ * An Arrow table or record batch, described by its shape rather than by
+ * its class.
+ *
+ * Structural on purpose. `apache-arrow` is not a dependency of this
+ * client and should not have to be: recognizing a table by the two
+ * things every version of it has means a caller's copy of that library
+ * and this client's are never two copies of one package disagreeing
+ * about `instanceof`, and it means anything else that speaks the same
+ * shape works too.
+ */
+export interface ZuArrowTable {
+  readonly schema: { readonly fields: readonly { readonly name: string }[] }
+  getChildAt(index: number): unknown
+}
+
+/**
+ * Columns the caller already holds, ready to be registered under a name.
+ *
+ * An Arrow table, or an object of column name to values. Both are read
+ * where they lie wherever there is one run of bytes to read: the two
+ * cases that copy are an Arrow column that arrived in several chunks,
+ * which is concatenated once, and a plain JavaScript array, which was
+ * never a column of numbers to begin with.
+ */
+export type ZuFrame = ZuArrowTable | Record<string, ZuFrameColumn>
+
+/**
  * A walk through the graph: nodes and edges, alternating, a node at
  * each end.
  *

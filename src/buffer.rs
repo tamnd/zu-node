@@ -114,6 +114,82 @@ impl Column {
         })
     }
 
+    /// The buffer a column starts as, going by its first value, or
+    /// `None` for a value no column holds.
+    ///
+    /// The other way round from [`Column::for_type`]: there is no table
+    /// saying what the column is, so the first value says it. The order
+    /// of the arms is the parameter binder's, and the one rule worth
+    /// knowing is the same one: a whole `number` starts a column of
+    /// whole numbers, because `[1, 2, 3]` is what a caller writes, and a
+    /// fractional one starts a column of floats.
+    pub fn start(env: &Env, value: Unknown<'_>) -> std::result::Result<Option<Column>, Mismatch> {
+        let mut column = match value.get_type()? {
+            ValueType::Boolean => Column::Bool(Vec::new()),
+            ValueType::String => Column::Str(Vec::new()),
+            ValueType::BigInt => Column::Int(Vec::new()),
+            ValueType::Number => match f64::from_unknown(value)?.fract() == 0.0 {
+                true => Column::Int(Vec::new()),
+                false => Column::Float(Vec::new()),
+            },
+            ValueType::Object => match moment(env, &value)? {
+                Some(Temporal::Date(_)) => Column::Date(Vec::new()),
+                Some(Temporal::LocalTime(_)) => Column::LocalTime(Vec::new()),
+                Some(Temporal::LocalDatetime(_)) => Column::LocalDatetime(Vec::new()),
+                Some(Temporal::Duration(kind, _)) => Column::Duration(kind, Vec::new()),
+                // A zoned time or datetime is a type this engine has
+                // nowhere to keep, and the push below is what words that,
+                // so the column starts as the local one it is closest to
+                // and refuses its own first value.
+                Some(Temporal::ZonedTime { .. }) => Column::LocalTime(Vec::new()),
+                Some(Temporal::ZonedDatetime { .. }) => Column::LocalDatetime(Vec::new()),
+                None => match value.is_typedarray()? {
+                    true => Column::Bytes(Vec::new()),
+                    false => return Ok(None),
+                },
+            },
+            _ => return Ok(None),
+        };
+        column.push(env, value)?;
+        Ok(Some(column))
+    }
+
+    /// Takes one more value, widening the column if the value asks it to.
+    ///
+    /// The one widening there is: a column of whole numbers that meets a
+    /// fractional one becomes a column of floats. `[1, 2, 2.5]` is a
+    /// column of numbers however it was written, and settling that on the
+    /// first value alone would refuse it at the third.
+    pub fn widening_push(
+        &mut self,
+        env: &Env,
+        value: Unknown<'_>,
+    ) -> std::result::Result<(), Mismatch> {
+        if let Column::Int(whole) = self
+            && value.get_type()? == ValueType::Number
+        {
+            let n = f64::from_unknown(value)?;
+            if n.fract() != 0.0 {
+                *self = Column::Float(whole.iter().map(|&n| n as f64).collect());
+            }
+        }
+        self.push(env, value)
+    }
+
+    /// How many values have gone in.
+    pub fn len(&self) -> usize {
+        match self {
+            Column::Int(v) => v.len(),
+            Column::Float(v) => v.len(),
+            Column::Bool(v) => v.len(),
+            Column::Str(v) => v.len(),
+            Column::Bytes(v) => v.len(),
+            Column::Date(v) => v.len(),
+            Column::LocalTime(v) | Column::LocalDatetime(v) => v.len(),
+            Column::Duration(_, v) => v.len(),
+        }
+    }
+
     /// Takes one more value, or says why this column would not have it.
     pub fn push(&mut self, env: &Env, value: Unknown<'_>) -> std::result::Result<(), Mismatch> {
         let holds = self.holds();
