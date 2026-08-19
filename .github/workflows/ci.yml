@@ -161,16 +161,20 @@ jobs:
   # binary that allocated rather than the leak that was reported, which
   # is what stops it growing a line every bad week.
   #
-  # --no-opt turns V8's optimizing tiers off, and it is here so that the
+  # --jitless turns V8's compilers off, and it is here so that the
   # uninitialised-value check can stay on. Maglev branches on memory
   # nobody wrote while it compiles, on a thread of its own, and reports
   # it from inside the node binary a dozen frames from anything this
   # package wrote. Suppressing that would mean suppressing a whole class
   # of error inside node, and that class is the one worth having: an
-  # addon that hands a half-filled buffer back is exactly what this
-  # tool sees and ASan does not. Turning the tier off removes the noise
-  # at its source and costs a job that is already fifty times slower
-  # than the real thing nothing it was measuring.
+  # addon that hands a half-filled buffer back is exactly what this tool
+  # sees and ASan does not. The flag is --jitless and not --no-opt
+  # because --no-opt left Maglev on and the job stayed red: the tiers
+  # have their own switches now and naming them one by one is a list
+  # that goes stale the next time V8 grows one. --jitless is the flag
+  # that cannot be partially true. The suite runs it in ten seconds
+  # against a job that is already fifty times slower than the real
+  # thing, so it costs nothing it was measuring.
   leaks:
     runs-on: ubuntu-latest
     steps:
@@ -205,14 +209,14 @@ jobs:
           LD_PRELOAD=/tmp/leak.so valgrind --error-exitcode=1 --leak-check=full \
             --show-leak-kinds=definite --errors-for-leak-kinds=definite \
             --suppressions=tools/valgrind.supp -q \
-            node --no-opt -e ''
+            node --jitless -e ''
           test $? -eq 1 || { echo "the leak gate did not fire on a leak"; exit 1; }
       - name: The suite, counted
         run: |
           valgrind --error-exitcode=1 --leak-check=full \
             --show-leak-kinds=definite --errors-for-leak-kinds=definite \
             --suppressions=tools/valgrind.supp -q \
-            node --no-opt --test "test/*.test.mjs"
+            node --jitless --test "test/*.test.mjs"
 
   # Bun and Deno run the same suite over the same binary, because the
   # binary is the same one: N-API is the ABI all three implement, and a
