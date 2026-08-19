@@ -103,6 +103,12 @@ impl Shape {
             spelling,
         }
     }
+
+    /// The table names, for the translation into Arrow, which asks for
+    /// them rather than keeping a copy of its own.
+    pub fn names(&self) -> &Names {
+        &self.names
+    }
 }
 
 /// What the tables in a result are called.
@@ -150,6 +156,21 @@ impl Names {
             .get(&id)
             .cloned()
             .unwrap_or_else(|| format!("#{id}"))
+    }
+}
+
+/// The same names, borrowed rather than copied, which is what the Arrow
+/// translation wants: a column of a million nodes is a million lookups
+/// and none of them should allocate. The stand-in for a table the
+/// catalog no longer has is written on that side, in the one place both
+/// clients share, so it reads the same here and in Python.
+impl zu_arrow::Tables for Names {
+    fn node(&self, id: u32) -> Option<&str> {
+        self.nodes.get(&id).map(String::as_str)
+    }
+
+    fn rel(&self, id: u32) -> Option<&str> {
+        self.rels.get(&id).map(String::as_str)
     }
 }
 

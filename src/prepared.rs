@@ -48,9 +48,10 @@ use napi::{Env, ScopedTask};
 use napi_derive::napi;
 use zudb::Interrupt;
 
+use crate::arrow::ArrowTask;
 use crate::columns::ColumnsTask;
 use crate::conn::{
-    CLOSED, ExecTask, Failure, Handles, QueryTask, Source, bind, failed, int_mode, watch,
+    CLOSED, ExecTask, Failure, Handles, QueryTask, Source, batch, bind, failed, int_mode, watch,
     wire_disposal, with,
 };
 use crate::value::Spelling;
@@ -159,6 +160,24 @@ impl Prepared {
         options: Option<Object<'_>>,
     ) -> AsyncTask<ColumnsTask> {
         AsyncTask::new(ColumnsTask(self.task(env, params, options)))
+    }
+
+    /// Runs it and gives back the bytes of an Arrow IPC stream.
+    #[napi(
+        ts_args_type = "params?: Record<string, ZuParam> | null, options?: ZuArrowOptions | null",
+        ts_return_type = "Promise<ZuArrow>"
+    )]
+    pub fn arrow(
+        &self,
+        env: &Env,
+        params: Option<Unknown<'_>>,
+        options: Option<Object<'_>>,
+    ) -> AsyncTask<ArrowTask> {
+        let batch = batch(options.as_ref());
+        AsyncTask::new(ArrowTask {
+            task: self.task(env, params, options),
+            batch,
+        })
     }
 
     /// Gives the id back to the session.

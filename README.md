@@ -75,7 +75,7 @@ The switches come across, including `bigIntMode` and `temporal`, because a pool 
 
 ## What works today
 
-`connect`, `query`, `exec`, `stream`, `close`, `dispose` and `await using`. `duplicate`, for a second connection made from the first. Named parameters both ways, including lists, records and nesting. Every scalar the engine has, plus nodes, edges and paths with their tables named rather than numbered, and `ZuDate`, `ZuTime`, `ZuTimestamp` and `ZuDuration`, with `{ temporal: true }` and `toTemporal()` for the runtimes that have `Temporal`. Read-only connections, databases in memory, memory and thread limits. `bigIntMode`, per statement or per connection. An `AbortSignal` on any statement, and `rowsRead` and `progress` for watching the one running now. The full error surface above, and `isZuError` to recognize it. Streaming, as an async iterable, as batches and as a Web Stream. Transactions, with `inTransaction` on the connection. An appender, for loading rows a batch at a time, and `load` for building a whole database out of columns and an edge list. Registered frames, so an Arrow table or an object of typed arrays is something a statement can match on without the rows being copied. `columnar`, for a result read down its columns as the buffers themselves rather than across its rows as objects. Prepared statements, compiled at the line that asked and run as often as wanted, and `explain` and `profile`, as a tree a program walks and as the listing a person reads. Both module formats, typed separately.
+`connect`, `query`, `exec`, `stream`, `close`, `dispose` and `await using`. `duplicate`, for a second connection made from the first. Named parameters both ways, including lists, records and nesting. Every scalar the engine has, plus nodes, edges and paths with their tables named rather than numbered, and `ZuDate`, `ZuTime`, `ZuTimestamp` and `ZuDuration`, with `{ temporal: true }` and `toTemporal()` for the runtimes that have `Temporal`. Read-only connections, databases in memory, memory and thread limits. `bigIntMode`, per statement or per connection. An `AbortSignal` on any statement, and `rowsRead` and `progress` for watching the one running now. The full error surface above, and `isZuError` to recognize it. Streaming, as an async iterable, as batches and as a Web Stream. Transactions, with `inTransaction` on the connection. An appender, for loading rows a batch at a time, and `load` for building a whole database out of columns and an edge list. Registered frames, so an Arrow table or an object of typed arrays is something a statement can match on without the rows being copied. `columnar`, for a result read down its columns as the buffers themselves rather than across its rows as objects, and `arrow`, for the same result as an Arrow IPC stream that any Arrow reader takes. Prepared statements, compiled at the line that asked and run as often as wanted, and `explain` and `profile`, as a tree a program walks and as the listing a person reads. Both module formats, typed separately.
 
 Build it with `npm run build`, and run the suite with `npm test`. Nothing is published yet, so `npm i zudb` is not a thing you can type at anybody's terminal, but everything it will do is built and installed on every run of the release workflow.
 
@@ -251,15 +251,15 @@ read.columns[0].values; // a BigInt64Array of every age, and not one object
 The buffers are the engine's own, moved rather than read: the pointer V8 is given is the pointer the engine filled, and the allocation is freed when the typed array is collected. So a column of a million integers crosses the boundary as a pointer and a length. On this machine, with `npm run bench:columnar` over a million rows:
 
 ```
-one integer column, columnar       38.4 ms      38 ns/row
-one integer column, rows          243.1 ms     243 ns/row
-a string column, columnar          50.3 ms      50 ns/row
-a string column, rows             262.0 ms     262 ns/row
-three columns, columnar            75.8 ms      76 ns/row
-three columns, rows               632.2 ms     632 ns/row
+one integer column, columnar        2.6 ms       3 ns/row
+one integer column, rows          240.7 ms     241 ns/row
+a string column, columnar          12.4 ms      12 ns/row
+a string column, rows             253.1 ms     253 ns/row
+three columns, columnar            16.0 ms      16 ns/row
+three columns, rows               608.7 ms     609 ns/row
 ```
 
-Walking what came back costs the same either way, at about 14 ns a row for a sum over the buffer and the same over the rows, which is worth saying because it is where the win is not. V8 reads a property of a small object about as fast as an element of a typed array. What it cannot do is make a million of those objects for nothing, and that is the whole of the six to eight times above.
+Walking what came back costs the same either way, at about 14 ns a row for a sum over the buffer and the same over the rows, which is worth saying because it is where the win is not. V8 reads a property of a small object about as fast as an element of a typed array. What it cannot do is make a million of those objects for nothing, and it is not the only thing not happening on the columnar line: the engine's sink fills those buffers as the statement runs, so a columnar read is a scan and a move, where a row read is a scan, a row per row and then an object per row on top of it. That is the whole of the twenty to ninety times above, and it is why the two lines of a pair are further apart the more columns there are.
 
 Every column says what it is, and reading one is a switch on `type` rather than a series of tests for what is there. `values` carries everything of a fixed width: a `BigInt64Array` of integers, nanoseconds or months, a `Float64Array` of floats, an `Int32Array` of days, and for booleans a `Uint8Array` of one bit a row, least significant bit first. A string column has `data`, the bytes of every string end to end, and `offsets`, one more than there are rows, so row `i` is `data.subarray(offsets[i], offsets[i + 1])`. `validity` is one bit a row again, set meaning the row has a value, and it is null when nothing in the column is, so the common case costs a reader nothing to skip. `unit` says whether a cell counts days, nanoseconds or months, and `zone` is the minutes east of UTC a column of zoned times was written with.
 
@@ -294,6 +294,61 @@ A statement that matched nothing still comes back with its columns, each one the
 
 `bigIntMode` says nothing here. A columnar read has one physical layout per type and an INT64 column is 64 bit cells however a caller would rather read one, which is the difference between a buffer and a value. The mode still decides what is inside `items`, where this client is making objects anyway.
 
+## Reading a result as Arrow
+
+`columnar` hands over the buffers and leaves the reader to say what each one means, which is eleven lines of Arrow before there is a table. `arrow` runs the same statement and writes those same buffers into an Arrow IPC stream, schema first, so what comes back is a result every Arrow implementation already reads:
+
+```ts
+// with apache-arrow installed, and nothing in zudb importing it
+import { tableFromIPC } from "apache-arrow";
+
+const read = await conn.arrow(`MATCH (p:person) RETURN p.name AS name, p.age AS age`);
+const table = tableFromIPC(read.ipc);
+table.numRows; // 1000000
+table.getChild("age").get(0); // 42n
+```
+
+`read.ipc` is a `Uint8Array`, and it is the addon's own allocation handed over rather than copied. Being bytes rather than an object is what makes it go places an object does not: it posts to a worker as a transferable instead of being cloned, it is a `fetch` body as it stands, it is what DuckDB-Wasm and every Arrow reader in the browser take, and it can be written to a file that `pyarrow` opens on the other side of the world. The framing is what that costs, from `npm run bench:arrow` over a million rows:
+
+```
+one integer column, arrow           8.5 ms       8 ns/row
+one integer column, columnar        3.8 ms       4 ns/row
+one integer column, rows          276.0 ms     276 ns/row
+three columns, arrow               24.1 ms      24 ns/row
+three columns, columnar            18.2 ms      18 ns/row
+three columns, rows               703.8 ms     704 ns/row
+```
+
+So the stream costs about a third more than handing the raw buffers over, and about a thirtieth of what building row objects costs. Reading it back is 0.3 ms for those three columns, because `tableFromIPC` reads the headers and points at the bytes rather than walking them. Take `columnar` when the next thing that happens to the numbers is a loop you are writing, and take `arrow` when the result is going somewhere that already speaks Arrow.
+
+Every zu type has one Arrow type, and it is the same one in every zu client:
+
+| zu | Arrow |
+|---|---|
+| INT64 | `Int64` |
+| FLOAT64 | `Float64` |
+| BOOL | `Bool` |
+| STRING | `Utf8`, or `LargeUtf8` past what a 32 bit offset addresses |
+| DATE | `Date32<DAY>` |
+| LOCAL TIME | `Time64<NANOSECOND>` |
+| LOCAL DATETIME | `Timestamp<NANOSECOND>` |
+| ZONED DATETIME | `Timestamp<NANOSECOND>` with the offset on the field |
+| DURATION, day-time | `Duration<NANOSECOND>` |
+| DURATION, year-month | `Interval<MONTH_DAY_NANO>` |
+| a node | a struct of `table` and `offset` |
+| an edge | a struct of `table`, `src`, `dst` and `ord` |
+| a path | a struct of `nodes` and `rels`, each a list of the above |
+| a list | an Arrow list |
+| a record | an Arrow struct |
+
+A path is two lists rather than one because Arrow has no type for a list whose elements alternate between two shapes, and a walk is the nodes it visited and the edges it crossed either way, one more node than edge. A node names its table rather than numbering it, which is the same name `query` puts on a `ZuNode`.
+
+Two things have no Arrow type at all and are refused by name rather than translated into something near enough. A `ZONED TIME` is a time with an offset, and Arrow has a time and a timestamp and nothing in between, so dropping the offset would move the value: read that column with `columnar`, where the cells and the offset arrive side by side. A handle to a graph or to a binding table is a reference to something that is not in the result, so there is nothing to put in a column. A column that mixes two types is refused the same way it is for `columnar`, naming the column and the row that did it.
+
+`batchRows` says how many rows go in one record batch, and it is 65,536 by default. The arrays are built whole and a batch is a slice of them, so the size costs nothing to change and is worth naming only when the reader on the other side wants a particular one. A statement that matched nothing is a schema and one empty batch rather than no bytes at all, so the columns and their types are known either way, and a table built from an empty answer concatenates with one built from a full answer.
+
+The translation itself is not in this package. It lives in the engine, beside the query planner, and the Python client exports through the same code, so a year-month duration is a month interval in both and a node names its table in both. That is deliberate: two copies of it would be two sets of rules about what a duration is, and the second one would drift.
+
 ## Preparing a statement
 
 `conn.prepare` compiles a statement now and hands back something that runs it later, as often as it is asked to, with different values bound each time:
@@ -305,7 +360,7 @@ const ada = await find.query<{ id: bigint }>({ name: "ada" });
 const zoe = await find.query<{ id: bigint }>({ name: "zoe" });
 ```
 
-It answers the same three ways a connection does. `query` gives rows, `exec` gives nothing and is for a statement written to change something, and `columnar` gives the buffers. Each takes the bindings and the same options a statement takes, so a signal and a `bigIntMode` go on the run rather than on the prepare, since which run a caller wants to stop is a property of that run.
+It answers the same four ways a connection does. `query` gives rows, `exec` gives nothing and is for a statement written to change something, `columnar` gives the buffers and `arrow` gives the IPC stream. Each takes the bindings and the same options a statement takes, so a signal and a `bigIntMode` go on the run rather than on the prepare, since which run a caller wants to stop is a property of that run.
 
 What this is not is a speedup, and it is worth saying so here rather than letting a reader assume the thing every other client's documentation says. A driver prepares to save a round trip to a server, and there is no server and no round trip here. The engine already caches the plan for a statement by its text, so the second `conn.query` of the same string is not compiled a second time either. On this machine, with `npm run bench:prepared` over 100 rows and 5000 runs:
 
@@ -446,7 +501,7 @@ typedoc rather than api-documenter, which would have been the obvious pick since
 
 Anything outside that table has no binary and no source build to fall back on, so the install resolves nothing and the first `require` says so. The browser and the platforms nobody builds for are what the WASM target answers, later.
 
-`npm run bench` measures what this package adds to the engine, which is a row object and one JavaScript value per column: the same scan with the rows dropped is the floor, and the difference between the two is what the boundary costs. Run it against a release build, since a debug build of the engine moves the floor by an order of magnitude and not the rest of it. `npm run bench:append` does the same for the appender, `npm run bench:load` for building a database out of columns, `npm run bench:register` for registered frames, where what is being watched is that the registration does not scale with the rows, `npm run bench:columnar` for a result read down its columns against the same result read across its rows, and `npm run bench:prepared` for a prepared statement against the same text run again and against a text that is new every time, which is the one of these whose interesting number is that the first two are equal.
+`npm run bench` measures what this package adds to the engine, which is a row object and one JavaScript value per column: the same scan with the rows dropped is the floor, and the difference between the two is what the boundary costs. Run it against a release build, since a debug build of the engine moves the floor by an order of magnitude and not the rest of it. `npm run bench:append` does the same for the appender, `npm run bench:load` for building a database out of columns, `npm run bench:register` for registered frames, where what is being watched is that the registration does not scale with the rows, `npm run bench:columnar` for a result read down its columns against the same result read across its rows, `npm run bench:arrow` for the same result as an Arrow stream against both of those, where the number being watched is what the framing costs over handing the buffers straight over, and `npm run bench:prepared` for a prepared statement against the same text run again and against a text that is new every time, which is the one of these whose interesting number is that the first two are equal.
 
 ## Still to come
 
@@ -462,7 +517,7 @@ Bun and Deno in CI, and the WASM build for the browser.
 | Browser and edge | `zudb/wasm` | read-mostly, over OPFS or HTTP range requests |
 | Electron | the same binary | N-API is ABI-stable across Electron versions, so no per-Electron rebuild |
 
-`apache-arrow` is a dev dependency and not a dependency, and it is one so that the tests can build the tables the register path reads. Nothing in the package imports it, so a caller who never registers a frame never installs it.
+`apache-arrow` is a dev dependency and not a dependency, and it is one so that the tests can build the tables the register path reads and read back the streams `arrow` writes. Nothing in the package imports it: a frame is recognized by its shape and a stream is bytes, so a caller who wants neither never installs it, and one who does is free to install whichever version of Arrow they were going to use anyway.
 
 One binary serves all three, because N-API is the ABI all three implement, and the whole suite runs on each of them in CI rather than the other two being assumed from Node passing. `npm run test:bun` and `npm run test:deno` run it locally. What the three do not agree on is what a native error carries: V8 writes a `stack` when the error is made and JavaScriptCore writes none at all through N-API, so this client writes the header line itself when it finds none, non-enumerably, and `err.stack` starts with the condition's name on all of them.
 

@@ -17,6 +17,7 @@
 //! without.
 
 mod append;
+mod arrow;
 mod buffer;
 mod cancel;
 mod columns;
