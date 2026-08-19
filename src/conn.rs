@@ -956,7 +956,7 @@ fn int_mode(options: Option<&Object<'_>>, connection: Ints) -> std::result::Resu
 /// from a method whose every other failure is a rejection is a method
 /// callers have to wrap twice. So the argument arrives unread and this
 /// is what reads it.
-fn text(value: &Unknown<'_>, what: &str) -> std::result::Result<String, String> {
+pub(crate) fn text(value: &Unknown<'_>, what: &str) -> std::result::Result<String, String> {
     match value.get_type().map_err(|err| err.reason)? {
         ValueType::String => String::from_unknown(*value).map_err(|err| err.reason),
         other => Err(format!(

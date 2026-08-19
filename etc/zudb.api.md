@@ -55,6 +55,9 @@ export interface ConnectOptions {
 export function isZuError(value: unknown): value is ZuError
 
 // @public
+export function load(path: string, options: ZuLoadOptions): Promise<ZuLoadStats>
+
+// @public
 export class Transaction {
     commit(): Promise<void>
     dispose(): Promise<void>
@@ -124,6 +127,9 @@ export class ZuDuration {
 }
 
 // @public
+export type ZuEdges = readonly (readonly [number, number])[] | Int32Array | Uint32Array
+
+// @public
 export interface ZuError extends Error {
     readonly code?: string
     // (undocumented)
@@ -170,6 +176,25 @@ export type ZuFrameValue =
 | ZuTimestamp
 | ZuDuration
 | ZuTemporalValue
+
+// @public
+export interface ZuLoadOptions {
+    readonly columns?: Readonly<Record<string, ZuFrameColumn>>
+    readonly edges?: ZuEdges | null
+    readonly nodes: string
+    readonly rels?: string
+    readonly rows?: number
+}
+
+// @public
+export interface ZuLoadStats {
+    // (undocumented)
+    readonly columns: number
+    // (undocumented)
+    readonly nodes: number
+    // (undocumented)
+    readonly rels: number
+}
 
 // @public
 export class ZuNode {

@@ -712,4 +712,5 @@ module.exports.ZuTime = nativeBinding.ZuTime
 module.exports.ZuTimestamp = nativeBinding.ZuTimestamp
 module.exports.abiVersion = nativeBinding.abiVersion
 module.exports.connect = nativeBinding.connect
+module.exports.load = nativeBinding.load
 module.exports.version = nativeBinding.version

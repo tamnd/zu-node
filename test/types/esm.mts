@@ -5,14 +5,17 @@
 import {
   connect,
   isZuError,
+  load,
   ZuDate,
   type Appender,
   type ZuAppendValue,
   type ZuBatch,
   type ZuBigIntMode,
   type ZuError,
+  type ZuEdges,
   type ZuFrame,
   type ZuFrameColumn,
+  type ZuLoadStats,
   type ZuPlainDate,
   type ZuRows,
   type ZuStream,
@@ -132,6 +135,29 @@ export async function loaded(path: string, people: [bigint, string][]): Promise<
   if (buffered !== people.length) throw new Error('a row went missing')
   const written: number = await rows.flush()
   return written + rows.committed
+}
+
+export async function built(path: string, uid: BigInt64Array): Promise<number> {
+  // Both spellings of an edge list are the one type, so a program that
+  // has its edges flat and a program that has them in pairs both
+  // compile without either of them saying which they meant.
+  const pairs: ZuEdges = [
+    [0, 1],
+    [1, 2],
+  ]
+  const flat: ZuEdges = new Uint32Array([0, 1, 1, 2])
+
+  const stats: ZuLoadStats = await load(path, {
+    nodes: 'person',
+    rels: 'knows',
+    columns: { uid, name: ['ada', 'grace', 'kay'] },
+    edges: uid.length === 3 ? pairs : flat,
+  })
+
+  // Numbers rather than bigints, which is the one place in this package
+  // a count is not a `bigint`, since these are counts the client made
+  // rather than an INT64 a statement gave back.
+  return stats.nodes + stats.rels + stats.columns
 }
 
 export async function matched(path: string, ages: Int32Array): Promise<number> {

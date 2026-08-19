@@ -159,6 +159,7 @@ function isZuError(value) {
 
 module.exports = {
   connect: binding.connect,
+  load: binding.load,
   version: binding.version,
   abiVersion: binding.abiVersion,
   isZuError,
