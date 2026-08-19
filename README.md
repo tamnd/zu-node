@@ -36,7 +36,7 @@ The rows are an array, so iterating them is `for (const row of rows)` and nothin
 
 ## What works today
 
-`connect`, `query`, `exec`, `stream`, `close`, `dispose` and `await using`. Named parameters both ways, including lists, records and nesting. Every scalar the engine has, plus nodes, edges and paths with their tables named rather than numbered, and `ZuDate`, `ZuTime`, `ZuTimestamp` and `ZuDuration`, with `{ temporal: true }` and `toTemporal()` for the runtimes that have `Temporal`. Read-only connections, memory and thread limits. `bigIntMode`, per statement or per connection. An `AbortSignal` on any statement. The full error surface above, and `isZuError` to recognize it. Streaming, as an async iterable, as batches and as a Web Stream. Both module formats, typed separately.
+`connect`, `query`, `exec`, `stream`, `close`, `dispose` and `await using`. Named parameters both ways, including lists, records and nesting. Every scalar the engine has, plus nodes, edges and paths with their tables named rather than numbered, and `ZuDate`, `ZuTime`, `ZuTimestamp` and `ZuDuration`, with `{ temporal: true }` and `toTemporal()` for the runtimes that have `Temporal`. Read-only connections, memory and thread limits. `bigIntMode`, per statement or per connection. An `AbortSignal` on any statement. The full error surface above, and `isZuError` to recognize it. Streaming, as an async iterable, as batches and as a Web Stream. Transactions, with `inTransaction` on the connection. Both module formats, typed separately.
 
 Build it with `npm run build`, and run the suite with `npm test`. Nothing is published yet, so `npm i zudb` is not a thing you can type at anybody's terminal, but everything it will do is built and installed on every run of the release workflow.
 
@@ -76,6 +76,31 @@ A connection runs one statement at a time, and a stream that has started is that
 Between the statement and the loop sit two batches, which is the whole of the buffering: a reader slower than the scan stops the scan rather than filling memory behind it. `{ batchRows: 512 }` sets what a batch may hold, which is what to name when the rows are going somewhere with a size of its own. On 50k rows here a stream costs about 460ns a row against 370ns for `query`, reading a batch at a time costs about 320ns, and reading the first batch and stopping costs 1.1ms against 18.6ms for the whole scan, which is what the whole thing is for.
 
 A statement that has to see every row before it can give one, which is `ORDER BY`, `DISTINCT` and the aggregates, runs whole and is handed over in batches afterwards. The loop is the same either way and `summary.streamed` is what tells them apart.
+
+## Several statements as one unit of work
+
+One statement is atomic on its own. `conn.transaction()` is how two of them stand or fall together:
+
+```ts
+const tx = await conn.transaction();
+await conn.exec(`INSERT (p:Person {id: $id, name: $name})`, { id: 3n, name: "ida" });
+await conn.exec(`INSERT (p:Person {id: $id, name: $name})`, { id: 4n, name: "eve" });
+await tx.commit();
+```
+
+The statements are still the connection's, because the span is the connection's and not a second handle to it. `conn.inTransaction` says whether one is open, and it is the session's own answer rather than a tally kept here, so a caller who would rather write `START TRANSACTION`, `COMMIT` and `ROLLBACK` as statements gets the same answer from it. `{ readOnly: true }` starts a span that refuses the statement that writes. Nesting is refused by the engine, with the engine's own condition.
+
+`await using tx` rolls back. That is the opposite of what the Python client's `with` block does, and the difference is in the language rather than in the database: a Python context manager is handed the exception unwinding through it and can tell a block that ended well from one that failed, and a JavaScript disposal is told nothing at all. A disposal that committed would commit half the work of a block that threw, which is the one thing a transaction exists to prevent. So the commit is the word the caller writes, and leaving the block without writing it undoes the span:
+
+```ts
+{
+  await using tx = await conn.transaction();
+  await conn.exec(`INSERT (p:Person {id: 5, name: 'zoe'})`);
+  await tx.commit(); // without this line the insert is undone
+}
+```
+
+A block that ends well and forgets to commit loses its work, which is a loud kind of wrong and shows up the first time the code runs. The alternative was a block that failed and kept half of what it did, which is a quiet kind and shows up in production. Committing or rolling back twice is refused as a `ZuUsageError` rather than ignored, since the statements after the first end belong to no transaction of yours. Leaving the block of a transaction whose connection has already been closed says nothing, because a closed connection took the unwritten span with it and there is nothing left to undo.
 
 ## Asking for numbers instead of bigints
 

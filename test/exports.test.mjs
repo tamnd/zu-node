@@ -22,6 +22,7 @@ const SURFACE = [
   'abiVersion',
   'isZuError',
   'Connection',
+  'Transaction',
   'ZuStream',
   'ZuCursor',
   'ZuDate',

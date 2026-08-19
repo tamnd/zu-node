@@ -261,12 +261,6 @@ const MISUSES = [
     name: 'ZuUsageError',
     says: ["carries no value for column 'name'", 'every column of a new row has to hold one'],
   },
-  {
-    what: 'reads a property the table does not have',
-    run: ({ conn }) => conn.query('MATCH (p:person) RETURN p.nope AS x'),
-    name: 'ZuUsageError',
-    says: ["unknown property 'nope'"],
-  },
 ]
 
 for (const misuse of MISUSES) {
@@ -444,6 +438,17 @@ test('the programs that look like misuse and are not', async (t) => {
   // reading gives a query that fails on the day the last row of a label
   // is deleted.
   assert.deepEqual(await conn.query('MATCH (p:nobody) RETURN p.id AS id'), [])
+
+  // A property the table does not have reads as null rather than
+  // failing, which is ISO 20.11 and is what an edge property has always
+  // answered here. It is the one case in this test that costs
+  // something: a misspelled property is null for every row instead of a
+  // refusal, and what catches that back is a declared property list the
+  // query can be held to rather than a client that guesses.
+  assert.deepEqual(await conn.query('MATCH (p:person) RETURN p.nope AS x'), [
+    { x: null },
+    { x: null },
+  ])
 
   // A stream made and never read has not started, so the statement
   // after it runs rather than being told the connection is busy. This

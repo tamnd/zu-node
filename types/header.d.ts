@@ -283,6 +283,21 @@ export interface ZuStatementOptions {
 }
 
 /**
+ * What a transaction takes when it starts.
+ */
+export interface ZuTransactionOptions {
+  /**
+   * Starts it `READ ONLY`, which the engine refuses a write inside of
+   * at the statement that writes rather than at this call.
+   *
+   * Worth asking for on a span that only reads, because saying so is
+   * how a statement that was not meant to write is stopped by the
+   * database rather than by review.
+   */
+  readonly readOnly?: boolean
+}
+
+/**
  * What a failed call throws.
  *
  * An ordinary `Error`, so every `catch`, logger and unhandled rejection

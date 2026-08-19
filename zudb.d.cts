@@ -31,6 +31,17 @@ declare module './binding.cjs' {
       options?: ZuStreamOptions | null,
     ): ZuStream<Row>
   }
+
+  /**
+   * The disposal of a transaction, declared here for the same reason
+   * the connection's is: the key is a symbol and the generator writes
+   * method names as strings.
+   *
+   * It rolls back. Leaving the scope of a transaction that was never
+   * committed undoes it, which is what makes `await using` the safe
+   * spelling and the commit the word a caller writes.
+   */
+  interface Transaction extends AsyncDisposable {}
 }
 
 /**

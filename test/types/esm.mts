@@ -14,6 +14,7 @@ import {
   type ZuStream,
   type ZuSummary,
   type ZuValue,
+  type Transaction,
 } from 'zudb'
 
 export async function people(path: string, name: string): Promise<string[]> {
@@ -90,6 +91,21 @@ export async function serialized(path: string, mode: ZuBigIntMode): Promise<stri
     { bigIntMode: 'number' },
   )
   return JSON.stringify(rows.map((row) => ({ ...row, id: row.id + 1 })))
+}
+
+export async function moved(path: string, from: bigint, to: bigint): Promise<boolean> {
+  await using conn = await connect(path)
+
+  // `await using` on a transaction needs the same thing it needs on a
+  // connection, and the transaction's disposal is declared in the same
+  // place and for the same reason.
+  await using tx: Transaction = await conn.transaction()
+  const open: boolean = conn.inTransaction
+  await conn.exec('MATCH (p:person) WHERE p.id = $from SET p.id = $to', { from, to })
+  await tx.commit()
+
+  // Both are readable after the fact, and both are plain booleans.
+  return open && tx.done && !tx.readOnly
 }
 
 export function retryable(caught: unknown): boolean {
