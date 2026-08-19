@@ -373,7 +373,6 @@ export interface ZuProfile {
 
 // @public
 export interface ZuProgress extends Disposable {
-    // (undocumented)
     stop(): void
 }
 

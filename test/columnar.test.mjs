@@ -240,14 +240,26 @@ test('what no buffer covers arrives as the values themselves', async (t) => {
 
 test('a statement that matched nothing is columns of no rows', async (t) => {
   const { conn } = await twoPeople(t)
-  const read = await conn.columnar("MATCH (p:person) WHERE p.name = 'nobody' RETURN p.id AS id")
+  const read = await conn.columnar(
+    "MATCH (p:person) WHERE p.name = 'nobody' RETURN p.id AS id, p.name AS name",
+  )
+  const { id, name } = named(read)
 
   assert.equal(read.rows, 0)
-  assert.equal(read.columns.length, 1)
-  assert.equal(read.columns[0].length, 0)
-  // Nothing settled the type, so it is the type of nothing, which is
-  // the one every columnar format has for exactly this.
-  assert.equal(read.columns[0].type, 'null')
+  assert.equal(read.columns.length, 2)
+  // No row settled the type, so it is the type the plan declared and
+  // not the type of nothing: an empty answer has the schema the same
+  // statement would have had with rows in it, which is what makes a
+  // table built from one appendable to a table built from the other.
+  assert.equal(id.type, 'int')
+  assert.equal(id.length, 0)
+  assert.equal(id.values.length, 0)
+  // A string column of no rows still carries the offset every string
+  // column starts from, so the subarray arithmetic holds at zero rows
+  // rather than being a case a reader has to special case.
+  assert.equal(name.type, 'string')
+  assert.equal(name.data.length, 0)
+  assert.deepEqual([...name.offsets], [0])
 })
 
 test('a statement that projects nothing has no columns and says so', async (t) => {
@@ -351,15 +363,23 @@ test('a million rows come back down one buffer and the loop stays free', async (
 
   let ticks = 0
   const timer = setInterval(() => (ticks += 1), 1)
+  const at = performance.now()
   const read = await conn.columnar('MATCH (n:number) RETURN n.at AS at')
+  const took = performance.now() - at
   clearInterval(timer)
 
   assert.equal(read.rows, rows)
   assert.equal(read.columns[0].values.length, rows)
   assert.equal(read.columns[0].values[rows - 1], BigInt(rows))
   // The whole read is on the threadpool, so the timer kept firing
-  // throughout it rather than queueing behind it.
-  assert.ok(ticks > 20, `the event loop ticked ${ticks} times`)
+  // throughout it rather than queueing behind it. The bar is a tick
+  // every ten milliseconds of the read and not a fixed count, because
+  // a blocked loop fires none however long the read takes and a fixed
+  // count turns every speedup into a failure.
+  assert.ok(
+    ticks > took / 10,
+    `the event loop ticked ${ticks} times in ${took.toFixed(0)} ms`,
+  )
 })
 
 // The types every fixed-width column maps to, which is the whole of
