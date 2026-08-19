@@ -570,6 +570,34 @@ export interface ZuProfile {
 }
 
 /**
+ * What a watch on a running statement takes.
+ */
+export interface ZuProgressOptions {
+  /**
+   * How long to wait between looks, in milliseconds. A tenth of a
+   * second by default, which is about where a person stops reading a
+   * number and starts seeing it move.
+   *
+   * What one look costs is an atomic read, so this is a question about
+   * how often the callback should run rather than about how much the
+   * watch costs the statement.
+   */
+  readonly everyMs?: number
+}
+
+/**
+ * A watch on a running statement, which is stopped by `stop()` or by
+ * leaving the scope of a `using`.
+ *
+ * Stopping twice does nothing, and so does stopping one that has
+ * already been left behind.
+ */
+export interface ZuProgress extends Disposable {
+  /** Stops the watch. The callback is not called again. */
+  stop(): void
+}
+
+/**
  * What a streamed statement takes beside its parameters.
  */
 export interface ZuStreamOptions extends ZuStatementOptions {

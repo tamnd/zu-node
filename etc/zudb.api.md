@@ -44,6 +44,7 @@ export class Connection {
     get readOnly(): boolean
     register(name: string, data: ZuFrame): Promise<number>
     registered(): Promise<string[]>
+    get rowsRead(): number
     transaction(options?: ZuTransactionOptions | null): Promise<Transaction>
     unregister(name: string): Promise<void>
 }
@@ -368,6 +369,17 @@ export interface ZuProfile {
     readonly stages: ZuStage[]
     // (undocumented)
     readonly text: string
+}
+
+// @public
+export interface ZuProgress extends Disposable {
+    // (undocumented)
+    stop(): void
+}
+
+// @public
+export interface ZuProgressOptions {
+    readonly everyMs?: number
 }
 
 // @public

@@ -22,6 +22,7 @@ import {
   type ZuPlainDate,
   type ZuPlan,
   type ZuPlanNode,
+  type ZuProgress,
   type ZuRows,
   type ZuStream,
   type ZuSummary,
@@ -283,4 +284,24 @@ export async function scans(path: string): Promise<boolean> {
   const walk = (node: ZuPlanNode): boolean =>
     node.op === 'ScanNodes' || node.children.some(walk)
   return plan.root === null ? false : walk(plan.root)
+}
+
+export async function watched(path: string): Promise<number> {
+  await using conn = await connect(path, { readOnly: true })
+
+  // A watch is disposable, and the plain kind rather than the async
+  // kind, because stopping a timer is not something to wait for.
+  let seen = 0
+  using watch: ZuProgress = conn.progress((rows: number) => {
+    seen = rows
+  }, { everyMs: 250 })
+
+  await conn.query('MATCH (p:person) RETURN p.id AS id')
+
+  // Both halves of it are there for a caller who would rather stop it
+  // by hand, and the count on the connection is a number like the one
+  // the callback is handed.
+  watch.stop()
+  const rowsRead: number = conn.rowsRead
+  return Math.max(seen, rowsRead)
 }

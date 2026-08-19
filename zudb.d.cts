@@ -1,19 +1,29 @@
 /* The types for `require('zudb')`. */
 
-import type { ZuBatch, ZuError, ZuParam, ZuStreamOptions, ZuSummary, ZuValue } from './binding.cjs'
+import type {
+  ZuBatch,
+  ZuError,
+  ZuParam,
+  ZuProgress,
+  ZuProgressOptions,
+  ZuStreamOptions,
+  ZuSummary,
+  ZuValue,
+} from './binding.cjs'
 
 export * from './binding.cjs'
 
 /**
- * The two things about a connection that are not written in Rust.
+ * The three things about a connection that are not written in Rust.
  *
  * The disposal is put on every connection as it is made, under the key
  * `await using` looks up. It cannot be declared where the rest of the
  * class is, because the generator writes that file from the Rust and a
  * method's name there is a string while this key is a symbol.
  *
- * `stream` is on the prototype for a plainer reason: its body is an
- * async generator, and there is nowhere in Rust to write one.
+ * `stream` and `progress` are on the prototype for a plainer reason:
+ * one of them is an async generator and the other is a timer, and
+ * neither is a thing to write in Rust.
  */
 declare module './binding.cjs' {
   interface Connection extends AsyncDisposable {
@@ -30,6 +40,22 @@ declare module './binding.cjs' {
       params?: Record<string, ZuParam> | null,
       options?: ZuStreamOptions | null,
     ): ZuStream<Row>
+
+    /**
+     * Calls back with `rowsRead` while a statement runs, for drawing a
+     * progress bar with.
+     *
+     * A timer around the counter rather than a hook inside the
+     * executor, so the statement it is watching does not know it is
+     * being watched and does not slow down for it. The callback runs
+     * only when the number has moved, which is what makes a watch left
+     * on an idle connection quiet.
+     *
+     * It is stopped by `stop()`, by leaving the scope of a `using`, or
+     * by the program ending, since the timer does not hold the loop
+     * open on its own.
+     */
+    progress(onRows: (rows: number) => void, options?: ZuProgressOptions | null): ZuProgress
   }
 
   /**

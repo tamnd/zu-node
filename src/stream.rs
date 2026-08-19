@@ -34,7 +34,7 @@ use zudb::query::Value;
 use zudb::{Batch, Flow, Streamed, ZuError};
 
 use crate::cancel::{Guard, Watch};
-use crate::conn::{CLOSED, Failure, STREAMING, beside, failed, notices};
+use crate::conn::{CLOSED, Failure, STREAMING, began, beside, failed, notices};
 use crate::value::{Shape, Spelling, to_js};
 
 /// How many batches may sit between the statement and the reader.
@@ -674,6 +674,7 @@ impl Started {
         // From here the connection is this statement's, so this is
         // where a signal can start stopping it. A signal that fired
         // first ends the statement without the engine ever seeing it.
+        began(conn);
         if let Some(guard) = &self.guard
             && !guard.enter()
         {
