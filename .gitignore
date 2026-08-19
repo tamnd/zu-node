@@ -7,6 +7,11 @@ dist/
 # compared against the one in etc/ that is committed.
 temp/
 
+# The generated API reference. Built from the declarations rather than
+# kept beside them, so a copy in the tree is a copy that is out of date
+# the moment a signature moves.
+reference/
+
 # The built addon, which napi drops into the source tree so that the
 # tests load the same file a published package would.
 *.node

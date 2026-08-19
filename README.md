@@ -146,6 +146,12 @@ Both formats reach one loaded addon, so a `ZuDate` made through `import` is an i
 
 The declarations are separate files rather than one shared `.d.ts`, since a resolver reads `.d.cts` for `require` and `.d.mts` for `import`, and `types` is the first condition in each entry: conditions match in the order they are written, so `types` after `default` is a `types` nothing reaches, and a package that compiles here would be `any` everywhere else. `npm run check:types` compiles a program in each format against the published shape, and `npm run check:package` runs [`attw`](https://github.com/arethetypeswrong/arethetypeswrong.github.io) over a real `npm pack` for node10, node16 CJS, node16 ESM and bundler resolution.
 
+## Reference
+
+Every exported name, its signature and what its doc comment says, generated from the declarations this package publishes rather than written by hand beside them. The release builds it from the version it is about to publish, and `npm run reference` builds the same pages here.
+
+typedoc rather than api-documenter, which would have been the obvious pick since api-extractor already runs here for the stability report. api-extractor's doc model does not carry `conn.stream(...)` or `await using`, because both reach the type of a connection through the `declare module` in `zudb.d.cts` and it does not follow one. A reference missing the streaming entry point is a reference that sends a reader to the cursor. So the generator that reads the declarations with the TypeScript compiler is the one used, and the build fails if it stops carrying them, along with any exported name whose types have gone missing.
+
 ## Installing, once there is something to install
 
 `npm i zudb`, and that is the whole of it. The install downloads one file, runs nothing, and needs no compiler: the root package carries the loader and no binary, each platform has its own package holding exactly one addon, and npm picks the one for the machine out of `optionalDependencies` by its `os`, `cpu` and `libc`. There is no `postinstall`, no `node-gyp`, no `node-pre-gyp` and no fetch from anywhere but the registry, which is what makes the package installable behind a proxy, inside a locked-down CI image, and on a machine with no toolchain on it.
