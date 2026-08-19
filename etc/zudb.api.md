@@ -22,7 +22,7 @@ export class Appender {
 }
 
 // @public
-export function connect(path: string, options?: ConnectOptions | undefined | null): Promise<Connection>
+export function connect(path?: string | ConnectOptions | undefined | null, options?: ConnectOptions | undefined | null): Promise<Connection>
 
 // @public
 export class Connection {
@@ -34,6 +34,7 @@ export class Connection {
     exec(statement: string, params?: Record<string, ZuParam> | null, options?: ZuStatementOptions | null): Promise<void>
     explain(statement: string): Promise<ZuPlan>
     get inTransaction(): boolean
+    get memory(): boolean
     get open(): boolean
     get path(): string
     prepare(statement: string): Promise<Prepared>

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, stat } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { mkdtemp, readdir, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -111,4 +112,75 @@ test('the executor takes the limits it was opened with', async (t) => {
 
   await conn.exec("INSERT (p:person {id: 1, name: 'ada'})")
   assert.equal((await conn.query('MATCH (p:person) RETURN p.name AS name')).length, 1)
+})
+
+test('connecting with no path is a database in memory that makes no file', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'zu-node-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+
+  const conn = await connect()
+  t.after(() => conn.close())
+
+  assert.equal(conn.memory, true)
+  assert.equal(conn.path, ':memory:')
+  assert.equal(conn.readOnly, false)
+  await conn.exec("INSERT (p:person {id: 1, name: 'ada'})")
+  assert.deepEqual([...(await conn.query('MATCH (p:person) RETURN p.name AS name'))], [{ name: 'ada' }])
+  assert.deepEqual(await readdir(dir), [], 'nothing was written anywhere')
+})
+
+test('the name every embedded database spells it with means the same thing', async (t) => {
+  // The bug this replaces: `':memory:'` used to make a file called
+  // `:memory:` in whatever directory the caller was standing in, which
+  // is why the check below is on the directory this runs from.
+  const conn = await connect(':memory:')
+  t.after(() => conn.close())
+
+  assert.equal(conn.memory, true)
+  assert.equal(conn.path, ':memory:')
+  await conn.exec("INSERT (p:person {id: 1, name: 'ada'})")
+  assert.equal(existsSync(':memory:'), false, 'no file is called that')
+})
+
+test('options may stand where the path would', async (t) => {
+  const conn = await connect({ threads: 2, bigIntMode: 'number' })
+  t.after(() => conn.close())
+
+  assert.equal(conn.memory, true)
+  await conn.exec("INSERT (p:person {id: 1, name: 'ada'})")
+  const rows = await conn.query('MATCH (p:person) RETURN p.id AS id')
+  assert.deepEqual([...rows], [{ id: 1 }], 'the options were read, so INT64 is a number')
+})
+
+test('two databases in memory share nothing', async (t) => {
+  const one = await connect()
+  const two = await connect()
+  t.after(() => { one.close(); two.close() })
+
+  await one.exec("INSERT (p:person {id: 1, name: 'ada'})")
+  assert.equal((await one.query('MATCH (p:person) RETURN p.name AS name')).length, 1)
+  assert.equal((await two.query('MATCH (p:person) RETURN p.name AS name')).length, 0)
+})
+
+test('a database in memory takes a transaction and rolls it back', async (t) => {
+  const conn = await connect()
+  t.after(() => conn.close())
+
+  await conn.exec("INSERT (p:person {id: 1, name: 'ada'})")
+  const work = await conn.transaction()
+  await conn.exec("INSERT (p:person {id: 2, name: 'zoe'})")
+  await work.rollback()
+  assert.equal((await conn.query('MATCH (p:person) RETURN p.name AS name')).length, 1)
+})
+
+test('a database on disk is not one in memory', async (t) => {
+  const { conn } = await fresh(t)
+  assert.equal(conn.memory, false)
+})
+
+test('a database in memory cannot be opened read-only', async (t) => {
+  await assert.rejects(() => connect({ readOnly: true }), (err) => {
+    assert.equal(err.name, 'ZuUsageError')
+    return true
+  })
 })

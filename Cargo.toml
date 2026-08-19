@@ -18,8 +18,8 @@ crate-type = ["cdylib"]
 # with (ADR 0002), so a revision is the honest way to say which one.
 # A local checkout is used instead with a `paths` override in
 # `.cargo/config.toml`, which is untracked on purpose.
-zudb = { package = "zu", git = "https://github.com/tamnd/zu", rev = "8aa27d9c9df4087522f4314ea5b1d5850df27f8d" }
-zu-common = { git = "https://github.com/tamnd/zu", rev = "8aa27d9c9df4087522f4314ea5b1d5850df27f8d" }
+zudb = { package = "zu", git = "https://github.com/tamnd/zu", rev = "95c7c9909f3a2624515d27eb436da52936016960" }
+zu-common = { git = "https://github.com/tamnd/zu", rev = "95c7c9909f3a2624515d27eb436da52936016960" }
 # N-API by way of napi-rs (ADR 0002). `napi9` is the version of N-API
 # this addon declares it needs, which is what makes one binary work
 # across Node 24, Node 26, Electron and Bun without a rebuild: the

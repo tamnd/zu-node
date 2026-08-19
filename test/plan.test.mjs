@@ -11,6 +11,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
+import { connect } from 'zudb'
+
 import { fresh, isZuError, twoPeople } from './helper.mjs'
 
 const BY_NAME = 'MATCH (p:person) WHERE p.name = $name RETURN p.id AS id'
@@ -181,11 +183,30 @@ test('a profile is what the operators really did', async (t) => {
   assert.equal(scan.pulls, 1)
   assert.equal(scan.rows, 2)
   assert.equal(scan.flat, 2)
-  assert.equal(scan.estimate, 2)
-  // The optimizer was right about a table it has the statistics for,
-  // which is what a q-error of one means.
-  assert.equal(scan.qerror, 1)
+  // The estimate comes off the catalog's summary of the table, and rows
+  // written without folding the file have not reached it yet, so a table
+  // two statements old estimates low. That is the engine's to answer;
+  // what this client owes is that the number and the q-error derived
+  // from it arrive at all.
+  assert.ok(scan.estimate > 0)
+  assert.equal(scan.qerror, scan.rows / scan.estimate)
   assert.ok(scan.nanos > 0)
+})
+
+test('the estimate is the catalog summary once the file holds it', async (t) => {
+  // Written down because the difference between this and the profile
+  // above is a real one a reader would otherwise take for noise.
+  const { path, conn } = await twoPeople(t)
+  conn.close()
+
+  const again = await connect(path)
+  t.after(() => again.close())
+  const run = await again.profile('MATCH (p:person) RETURN p.name AS name')
+  const scan = run.stages[0].ops.find((op) => op.op === 'Scan')
+
+  assert.equal(scan.rows, 2)
+  assert.equal(scan.estimate, 2)
+  assert.equal(scan.qerror, 1)
 })
 
 test('an operator the optimizer has nothing to say about carries nulls', async (t) => {
