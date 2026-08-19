@@ -36,7 +36,10 @@ export class Connection {
     get path(): string
     query<Row = Record<string, ZuValue>>(statement: string, params?: Record<string, ZuParam> | null, options?: ZuStatementOptions | null): Promise<ZuRows<Row>>
     get readOnly(): boolean
+    register(name: string, data: ZuFrame): Promise<number>
+    registered(): Promise<string[]>
     transaction(options?: ZuTransactionOptions | null): Promise<Transaction>
+    unregister(name: string): Promise<void>
 }
 
 // @public
@@ -75,6 +78,14 @@ export type ZuAppendValue =
 | ZuTimestamp
 | ZuDuration
 | ZuTemporalValue
+
+// @public
+export interface ZuArrowTable {
+    // (undocumented)
+    getChildAt(index: number): unknown
+    // (undocumented)
+    readonly schema: { readonly fields: readonly { readonly name: string }[] }
+}
 
 // @public
 export interface ZuBatch<Row = Record<string, ZuValue>> extends Array<Row> {
@@ -129,6 +140,36 @@ export interface ZuError extends Error {
     // (undocumented)
     readonly severity?: 'success' | 'noData' | 'warning' | 'informational' | 'exception'
 }
+
+// @public
+export type ZuFrame = ZuArrowTable | Record<string, ZuFrameColumn>
+
+// @public
+export type ZuFrameColumn =
+| Int8Array
+| Uint8Array
+| Uint8ClampedArray
+| Int16Array
+| Uint16Array
+| Int32Array
+| Uint32Array
+| Float32Array
+| Float64Array
+| BigInt64Array
+| BigUint64Array
+| readonly ZuFrameValue[]
+
+// @public
+export type ZuFrameValue =
+| boolean
+| number
+| bigint
+| string
+| ZuDate
+| ZuTime
+| ZuTimestamp
+| ZuDuration
+| ZuTemporalValue
 
 // @public
 export class ZuNode {

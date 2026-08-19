@@ -152,6 +152,76 @@ export type ZuAppendValue =
   | ZuTemporalValue
 
 /**
+ * One value of a registered frame's column, when the column is written
+ * as a plain array.
+ *
+ * The same values an appender takes, without the bytes: a column of
+ * BYTES is a column no statement can read back yet, so registering one
+ * would be naming data the caller cannot get at. There is no `null`
+ * either, for the reason there is none in a row of an appender.
+ */
+export type ZuFrameValue =
+  | boolean
+  | number
+  | bigint
+  | string
+  | ZuDate
+  | ZuTime
+  | ZuTimestamp
+  | ZuDuration
+  | ZuTemporalValue
+
+/**
+ * One column of a registered frame.
+ *
+ * A typed array is the shape that costs nothing: the engine reads it
+ * where it lies and no byte of it is copied. A plain array is read into
+ * buffers of this client's own, because an array holds values of the
+ * runtime rather than numbers, and its first value settles what the
+ * column holds.
+ */
+export type ZuFrameColumn =
+  | Int8Array
+  | Uint8Array
+  | Uint8ClampedArray
+  | Int16Array
+  | Uint16Array
+  | Int32Array
+  | Uint32Array
+  | Float32Array
+  | Float64Array
+  | BigInt64Array
+  | BigUint64Array
+  | readonly ZuFrameValue[]
+
+/**
+ * An Arrow table or record batch, described by its shape rather than by
+ * its class.
+ *
+ * Structural on purpose. `apache-arrow` is not a dependency of this
+ * client and should not have to be: recognizing a table by the two
+ * things every version of it has means a caller's copy of that library
+ * and this client's are never two copies of one package disagreeing
+ * about `instanceof`, and it means anything else that speaks the same
+ * shape works too.
+ */
+export interface ZuArrowTable {
+  readonly schema: { readonly fields: readonly { readonly name: string }[] }
+  getChildAt(index: number): unknown
+}
+
+/**
+ * Columns the caller already holds, ready to be registered under a name.
+ *
+ * An Arrow table, or an object of column name to values. Both are read
+ * where they lie wherever there is one run of bytes to read: the two
+ * cases that copy are an Arrow column that arrived in several chunks,
+ * which is concatenated once, and a plain JavaScript array, which was
+ * never a column of numbers to begin with.
+ */
+export type ZuFrame = ZuArrowTable | Record<string, ZuFrameColumn>
+
+/**
  * A walk through the graph: nodes and edges, alternating, a node at
  * each end.
  *
@@ -531,6 +601,53 @@ export declare class Connection {
    * million rows later.
    */
   appender(table: string): Promise<Appender>
+  /**
+   * Registers columns the caller already holds as a table called
+   * `name`, and answers how many rows it has.
+   *
+   * The zero-copy way in. Nothing is read into the database: the
+   * engine is told where the caller's buffers are, and a statement
+   * that matches the name scans them where they lie, so registering
+   * ten million rows costs a description of their columns rather than
+   * ten million writes.
+   *
+   * ```js
+   * await conn.register('people', arrow.tableFromArrays({ id, name }))
+   * const rows = await conn.query('MATCH (p:people) RETURN p.name AS name')
+   * ```
+   *
+   * An Arrow table or record batch, which is what `apache-arrow` and
+   * everything built on it hands out, or an object of column name to
+   * values. The values of that object are typed arrays where the
+   * caller has them, which is the zero-copy shape, and plain arrays
+   * where they do not, which is read into buffers of this client's
+   * own because an array holds values of the runtime rather than
+   * numbers.
+   *
+   * A frame is a view and not a snapshot: write into the array behind
+   * it and the next statement answers what is there now. It belongs
+   * to this connection, is never written to the database, and no
+   * other program opening the same file sees it. Nothing writes to
+   * one either, so a statement that inserts into a registered name is
+   * refused with the reason.
+   */
+  register(name: string, data: ZuFrame): Promise<number>
+  /**
+   * Takes a registered frame's name away and gives the bytes back.
+   *
+   * The bytes go when the last statement reading them lets go, which
+   * is usually now and is never before: a frame a running statement
+   * is still scanning is held until it ends.
+   */
+  unregister(name: string): Promise<void>
+  /**
+   * The names frames are registered under on this connection, sorted.
+   *
+   * A method rather than a getter, and asynchronous like everything
+   * else here, because reading them takes the connection's lock and
+   * nothing on this class waits on the event loop.
+   */
+  registered(): Promise<string[]>
   /**
    * Runs one statement and gives back its rows.
    *

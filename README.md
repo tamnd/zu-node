@@ -36,7 +36,7 @@ The rows are an array, so iterating them is `for (const row of rows)` and nothin
 
 ## What works today
 
-`connect`, `query`, `exec`, `stream`, `close`, `dispose` and `await using`. Named parameters both ways, including lists, records and nesting. Every scalar the engine has, plus nodes, edges and paths with their tables named rather than numbered, and `ZuDate`, `ZuTime`, `ZuTimestamp` and `ZuDuration`, with `{ temporal: true }` and `toTemporal()` for the runtimes that have `Temporal`. Read-only connections, memory and thread limits. `bigIntMode`, per statement or per connection. An `AbortSignal` on any statement. The full error surface above, and `isZuError` to recognize it. Streaming, as an async iterable, as batches and as a Web Stream. Transactions, with `inTransaction` on the connection. An appender, for loading rows a batch at a time. Both module formats, typed separately.
+`connect`, `query`, `exec`, `stream`, `close`, `dispose` and `await using`. Named parameters both ways, including lists, records and nesting. Every scalar the engine has, plus nodes, edges and paths with their tables named rather than numbered, and `ZuDate`, `ZuTime`, `ZuTimestamp` and `ZuDuration`, with `{ temporal: true }` and `toTemporal()` for the runtimes that have `Temporal`. Read-only connections, memory and thread limits. `bigIntMode`, per statement or per connection. An `AbortSignal` on any statement. The full error surface above, and `isZuError` to recognize it. Streaming, as an async iterable, as batches and as a Web Stream. Transactions, with `inTransaction` on the connection. An appender, for loading rows a batch at a time. Registered frames, so an Arrow table or an object of typed arrays is something a statement can match on without the rows being copied. Both module formats, typed separately.
 
 Build it with `npm run build`, and run the suite with `npm test`. Nothing is published yet, so `npm i zudb` is not a thing you can type at anybody's terminal, but everything it will do is built and installed on every run of the release workflow.
 
@@ -123,6 +123,28 @@ What is buffered is typed from the table's own columns, read when the appender o
 Two more things are worth knowing before a load. A flush issued while one is still running is refused rather than queued, and so is an append, because waiting for either would be the event loop waiting for a write to disk: `await` the flush. And rows an appender writes are not part of an open transaction, since it writes through the file rather than through the session, so a `ROLLBACK` after a flush does not take them back. A load and a transaction are two different things to reach for.
 
 A rel table has no property columns. A row of one is the two ends of an edge, as offsets into the tables it runs between, so `conn.appender("knows")` takes two columns and the flush checks that both rows are there before it writes anything. That check is here rather than the engine's, because the engine's comes after the write is durable.
+
+## Matching on columns a program already has
+
+Columns a program is already holding become something a statement can match on, under a name the program picks.
+
+```ts
+await conn.register("people", table);
+const rows = await conn.query(`MATCH (p:people) WHERE p.age > 40 RETURN p.name AS name`);
+await conn.unregister("people");
+```
+
+An Arrow table goes in, which is what `apache-arrow` and everything built on it hands out, and so does an object of column name to typed array for a caller with none of that installed. `apache-arrow` is not a dependency of this package and is not imported by it: a table is recognized by its shape, so any library that speaks that shape takes the same path.
+
+Nothing is copied. What the engine is told is where each column is, how wide its values are and what they mean, and a statement that names the frame builds vectors pointing straight at the caller's arrays. So registering costs what describing the columns costs and not what the rows cost: on this machine a frame of a million rows registers in 26 microseconds and one of ten rows in 34, both of which are mostly the promise, since the round trip on its own is 16.
+
+The one column that is walked is a string column, and it is walked once. Every offset is checked at registration so that reading the frame afterwards cannot fail, which is 1.2 ms for a million strings. Two other things copy and both are said rather than hidden: a table that arrived as several record batches is concatenated into one, because a column of a frame is one run of bytes and two batches are two of them, and a column given as a plain array is read into a buffer of this client's own, because an array holds JavaScript values rather than numbers and there is nothing in it to point at. That last one is the expensive way in at 127 ns a row, and it is there so that a caller with an array is not stuck rather than because it is the way to do this.
+
+Because it is not a copy, a registered frame is a view and not a snapshot. Write into the typed array behind it and the next statement answers what is there now, which is the thing to know about the call and the reason it is worth having. Reading one is as fast as reading a table of the database and faster where the database has to decode: over a million rows here, summing an integer column takes 1.3 ms against a stored table's 1.6, and finding one row by a string takes 2.2 ms against 5.8.
+
+The frame belongs to the connection it was registered on and goes when that connection does. Nothing is written to the file, so another program opening the same database has never heard of it, and nothing writes to it either: a statement that inserts into or deletes from a registered name is refused with the reason, because that memory is the caller's array. `unregister(name)` takes the name away and hands the arrays back, which is not always that instant, since a statement still reading the frame holds it until it ends. `registered()` says what is registered here, and it is a method rather than a getter because it takes the connection's lock like everything else and nothing here blocks the event loop.
+
+Registering the same name again replaces what it stands for, columns and all. Registering over a table the database already holds is refused, since a statement naming it would mean the stored one. A frame with no rows is a table to match on and answers nothing, because a frame knows its columns without being told by a row. A null anywhere is refused by column and row, since a property that is null is one no row of this engine holds, and registering inside a transaction is refused because a frame is registered on the session, which is the thing the transaction is running on.
 
 ## Asking for numbers instead of bigints
 
@@ -216,7 +238,7 @@ typedoc rather than api-documenter, which would have been the obvious pick since
 
 Anything outside that table has no binary and no source build to fall back on, so the install resolves nothing and the first `require` says so. The browser and the platforms nobody builds for are what the WASM target answers, later.
 
-`npm run bench` measures what this package adds to the engine, which is a row object and one JavaScript value per column: the same scan with the rows dropped is the floor, and the difference between the two is what the boundary costs. Run it against a release build, since a debug build of the engine moves the floor by an order of magnitude and not the rest of it.
+`npm run bench` measures what this package adds to the engine, which is a row object and one JavaScript value per column: the same scan with the rows dropped is the floor, and the difference between the two is what the boundary costs. Run it against a release build, since a debug build of the engine moves the floor by an order of magnitude and not the rest of it. `npm run bench:append` does the same for the load path and `npm run bench:register` for registered frames, where what is being watched is that the registration does not scale with the rows.
 
 ## Still to come
 
@@ -232,7 +254,7 @@ Bun and Deno in CI, and the WASM build for the browser.
 | Browser and edge | `zudb/wasm` | read-mostly, over OPFS or HTTP range requests |
 | Electron | the same binary | N-API is ABI-stable across Electron versions, so no per-Electron rebuild |
 
-`apache-arrow` is an optional peer dependency behind the `zudb/arrow` entry point, so the base package stays small.
+`apache-arrow` is a dev dependency and not a dependency, and it is one so that the tests can build the tables the register path reads. Nothing in the package imports it, so a caller who never registers a frame never installs it.
 
 One binary serves all three, because N-API is the ABI all three implement, and the whole suite runs on each of them in CI rather than the other two being assumed from Node passing. `npm run test:bun` and `npm run test:deno` run it locally. What the three do not agree on is what a native error carries: V8 writes a `stack` when the error is made and JavaScriptCore writes none at all through N-API, so this client writes the header line itself when it finds none, non-enumerably, and `err.stack` starts with the condition's name on all of them.
 

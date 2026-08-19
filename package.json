@@ -72,6 +72,7 @@
     "reference": "node tools/reference.mjs reference",
     "bench": "node bench/query.mjs",
     "bench:append": "node bench/append.mjs",
+    "bench:register": "node bench/register.mjs",
     "bench:temporal": "node --harmony-temporal bench/query.mjs"
   },
   "devDependencies": {
@@ -79,6 +80,7 @@
     "@microsoft/api-extractor": "^7.58.12",
     "@napi-rs/cli": "^3.8.6",
     "@types/node": "^26.2.0",
+    "apache-arrow": "^21.2.0",
     "typedoc": "^0.28.20",
     "typescript": "^5.9.3"
   }

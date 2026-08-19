@@ -35,6 +35,7 @@ use zudb::{Config, Database, DiagnosticRecord, Interrupt, ZuError};
 use crate::append::OpenTask;
 use crate::cancel::Watch;
 use crate::error::{aborted, raise, usage};
+use crate::register::{self, RegisterTask, RegisteredTask, UnregisterTask};
 use crate::stream::{self, Started, ZuCursor};
 use crate::temporal;
 use crate::txn::StartTask;
@@ -400,6 +401,101 @@ impl Connection {
             named.as_deref().unwrap_or_default().to_string(),
             named.err(),
         ))
+    }
+
+    /// Registers columns the caller already holds as a table called
+    /// `name`, and answers how many rows it has.
+    ///
+    /// The zero-copy way in. Nothing is read into the database: the
+    /// engine is told where the caller's buffers are, and a statement
+    /// that matches the name scans them where they lie, so registering
+    /// ten million rows costs a description of their columns rather than
+    /// ten million writes.
+    ///
+    /// ```js
+    /// await conn.register('people', arrow.tableFromArrays({ id, name }))
+    /// const rows = await conn.query('MATCH (p:people) RETURN p.name AS name')
+    /// ```
+    ///
+    /// An Arrow table or record batch, which is what `apache-arrow` and
+    /// everything built on it hands out, or an object of column name to
+    /// values. The values of that object are typed arrays where the
+    /// caller has them, which is the zero-copy shape, and plain arrays
+    /// where they do not, which is read into buffers of this client's
+    /// own because an array holds values of the runtime rather than
+    /// numbers.
+    ///
+    /// A frame is a view and not a snapshot: write into the array behind
+    /// it and the next statement answers what is there now. It belongs
+    /// to this connection, is never written to the database, and no
+    /// other program opening the same file sees it. Nothing writes to
+    /// one either, so a statement that inserts into a registered name is
+    /// refused with the reason.
+    #[napi(
+        ts_args_type = "name: string, data: ZuFrame",
+        ts_return_type = "Promise<number>"
+    )]
+    pub fn register(
+        &self,
+        env: &Env,
+        name: Unknown<'_>,
+        data: Unknown<'_>,
+    ) -> AsyncTask<RegisterTask> {
+        // The frame is read here, on the thread that owns the runtime,
+        // because reading a JavaScript value is something no other
+        // thread may do. What travels is the description and the
+        // references keeping the buffers alive.
+        let read = match self.alive.load(Ordering::Acquire) {
+            true => text(&name, "name")
+                .and_then(|name| register::read(env, &name, data).map(|frame| (name, frame))),
+            false => Err(register::closed()),
+        };
+        let (name, described, refused) = match read {
+            Ok((name, described)) => (name, Some(described), None),
+            Err(message) => (String::new(), None, Some(message)),
+        };
+        AsyncTask::new(RegisterTask::new(self.frames(), name, described, refused))
+    }
+
+    /// Takes a registered frame's name away and gives the bytes back.
+    ///
+    /// The bytes go when the last statement reading them lets go, which
+    /// is usually now and is never before: a frame a running statement
+    /// is still scanning is held until it ends.
+    #[napi(ts_args_type = "name: string", ts_return_type = "Promise<void>")]
+    pub fn unregister(&self, name: Unknown<'_>) -> AsyncTask<UnregisterTask> {
+        let named = match self.alive.load(Ordering::Acquire) {
+            true => text(&name, "name"),
+            false => Err(register::closed()),
+        };
+        AsyncTask::new(UnregisterTask::new(
+            self.frames(),
+            named.as_deref().unwrap_or_default().to_string(),
+            named.err(),
+        ))
+    }
+
+    /// The names frames are registered under on this connection, sorted.
+    ///
+    /// A method rather than a getter, and asynchronous like everything
+    /// else here, because reading them takes the connection's lock and
+    /// nothing on this class waits on the event loop.
+    #[napi(ts_return_type = "Promise<string[]>")]
+    pub fn registered(&self) -> AsyncTask<RegisteredTask> {
+        let refused = match self.alive.load(Ordering::Acquire) {
+            true => None,
+            false => Some(register::closed()),
+        };
+        AsyncTask::new(RegisteredTask::new(self.frames(), refused))
+    }
+
+    /// The three handles a frame call runs against.
+    fn frames(&self) -> register::Held {
+        register::Held::new(
+            Arc::clone(&self.inner),
+            Arc::clone(&self.alive),
+            Arc::clone(&self.in_txn),
+        )
     }
 
     /// The task that starts one, whether or not it is going to work.

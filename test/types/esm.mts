@@ -11,6 +11,8 @@ import {
   type ZuBatch,
   type ZuBigIntMode,
   type ZuError,
+  type ZuFrame,
+  type ZuFrameColumn,
   type ZuPlainDate,
   type ZuRows,
   type ZuStream,
@@ -130,6 +132,32 @@ export async function loaded(path: string, people: [bigint, string][]): Promise<
   if (buffered !== people.length) throw new Error('a row went missing')
   const written: number = await rows.flush()
   return written + rows.committed
+}
+
+export async function matched(path: string, ages: Int32Array): Promise<number> {
+  await using conn = await connect(path)
+
+  // An object of columns is a frame, and a typed array is a column, so
+  // this compiles without the caller reaching for a cast. An Arrow table
+  // is the other half of the union and is structural, so a table from
+  // `apache-arrow` is one without this package importing that package.
+  const column: ZuFrameColumn = ages
+  const frame: ZuFrame = { age: column, name: ['ada', 'grace'] }
+
+  // A count of rows rather than nothing, so a caller can check that what
+  // went in is what they meant.
+  const rows: number = await conn.register('people', frame)
+
+  const found = await conn.query<{ n: bigint }>(
+    'MATCH (p:people) WHERE p.age > 40 RETURN count(*) AS n',
+  )
+
+  // A method rather than a getter, because it takes the lock like the
+  // rest of them, so it needs the `await` to typecheck.
+  const names: string[] = await conn.registered()
+  await conn.unregister('people')
+
+  return rows + names.length + Number(found[0]?.n ?? 0n)
 }
 
 export function retryable(caught: unknown): boolean {
