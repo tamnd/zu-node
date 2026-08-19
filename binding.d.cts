@@ -124,6 +124,34 @@ export type ZuParam =
   | { [field: string]: ZuParam }
 
 /**
+ * A value an appender takes, which is narrower than what a statement
+ * takes.
+ *
+ * A column of an appender has one type, read from the table when the
+ * appender opened, and every value in it is that type. So there is no
+ * `null` here: a column that holds nulls cannot be appended to at all
+ * and the appender says so when it opens, and `undefined` in a row is a
+ * value the caller forgot rather than a null they meant. There are no
+ * lists and no objects either, because a property column holds a scalar.
+ *
+ * BYTES is a `Uint8Array`, which is the one type here that no statement
+ * parameter can be, and INT64 is a `bigint` or a whole `number` below
+ * 2^53. A number past that is refused rather than rounded, because past
+ * 2^53 a number no longer names one integer.
+ */
+export type ZuAppendValue =
+  | boolean
+  | number
+  | bigint
+  | string
+  | Uint8Array
+  | ZuDate
+  | ZuTime
+  | ZuTimestamp
+  | ZuDuration
+  | ZuTemporalValue
+
+/**
  * A walk through the graph: nodes and edges, alternating, a node at
  * each end.
  *
@@ -334,6 +362,105 @@ export interface ZuError extends Error {
   readonly excerpt?: string
 }
 /**
+ * Rows on their way into a table, buffered until they are flushed.
+ *
+ * Take one with `Connection.appender`, append rows to it, and close
+ * it. What is buffered is columnar and typed from the table's own
+ * columns, read when the appender opened, so a value that does not
+ * belong in a column is refused by the call that appended it rather
+ * than at the flush that would have carried it, and the message names
+ * the column it did not fit.
+ */
+export declare class Appender {
+  /** The table these rows are going into. */
+  get table(): string
+  /** Rows buffered and not yet written. */
+  get buffered(): number
+  /** Rows this appender has committed, across every flush. */
+  get committed(): number
+  /** Whether this appender has been closed. */
+  get closed(): boolean
+  /**
+   * Appends one row, which is one value per column of the table, in
+   * the order the table declares them.
+   *
+   * Synchronous, and the only synchronous call in this client: the
+   * values go into memory and nothing else happens, so this is a
+   * conversion and a push per column. Being synchronous it throws
+   * rather than rejecting, with the same `ZuUsageError` every other
+   * refusal here carries.
+   *
+   * A row of the wrong width, or with a value that does not fit the
+   * column, is refused with nothing of it kept, so the appender is
+   * still usable once the caller has fixed the row.
+   */
+  appendRow(row: readonly ZuAppendValue[]): void
+  /**
+   * Appends every row of an array of rows.
+   *
+   * The same thing in a loop, and worth a call of its own because it
+   * is one check and one lock for the batch rather than one per row.
+   * A row that is refused stops the call where it was refused and the
+   * rows before it stay buffered: nothing here is a transaction until
+   * the flush, and throwing away work the caller can keep would not
+   * make it one. What it answers is how many rows went in, which is
+   * where a caller who caught the refusal starts again.
+   */
+  appendRows(rows: readonly (readonly ZuAppendValue[])[]): number
+  /**
+   * Writes every buffered row and makes it readable, and answers how
+   * many rows this appender has committed in all.
+   *
+   * One commit, whatever the buffer holds: the values are sealed into
+   * the file, one frame naming them is synced to the log, and the
+   * fold that follows puts them where every query looks. On return
+   * the buffer is empty and the rows are there. A flush with nothing
+   * buffered touches no file, so a loader can flush on a timer
+   * without writing empty commits.
+   *
+   * A flush that fails keeps its rows, so that what did not go in is
+   * still there to be looked at and tried again.
+   */
+  flush(): Promise<number>
+  /**
+   * Flushes what is left and answers how many rows this appender
+   * committed in all.
+   *
+   * Closing twice is not an error and writes nothing the second
+   * time, because an `await using` that closed early would otherwise
+   * fail on the way out.
+   */
+  close(): Promise<number>
+  /**
+   * The close `await using` calls, which is the intended way to
+   * scope an appender.
+   *
+   * It flushes, whether the block ended well or badly, which is the
+   * opposite of what the disposal of a transaction here does and is
+   * the same answer the Python client gives. The two differ because
+   * the question differs: a transaction that leaves its scope
+   * unfinished is a unit of work nobody completed, and a buffer that
+   * leaves its scope unwritten is a loader that read a million rows
+   * and threw them away. A caller who wants the rows gone writes
+   * `discard()` and gets exactly that.
+   *
+   * It is also reachable as `Symbol.asyncDispose`, which is what
+   * `await using` actually looks for and which [`wire_disposal`] puts
+   * on every appender as it is made.
+   */
+  dispose(): Promise<number>
+  /**
+   * Throws away what is buffered and answers how many rows that was.
+   *
+   * The way out of a load that went wrong halfway. A caller who has
+   * noticed that the rows are wrong wants them gone, and closing
+   * would write them. Rows an earlier flush committed are committed,
+   * and this does not reach them.
+   */
+  discard(): number
+}
+
+/**
  * One connection to one database.
  *
  * Statements run on it in order, one at a time. It reads the database
@@ -384,6 +511,26 @@ export declare class Connection {
    * commit half of the work of a block that failed.
    */
   transaction(options?: ZuTransactionOptions | null): Promise<Transaction>
+  /**
+   * Opens an appender on `table` and hands it back.
+   *
+   * The bulk-load path. A load written as statements pays a commit
+   * per row, and an appender pays one per flush, which is the whole
+   * difference between loading a million rows in an afternoon and
+   * loading them in a minute.
+   *
+   * ```js
+   * await using rows = await conn.appender('person')
+   * for (const [id, name] of people) rows.appendRow([id, name])
+   * await rows.flush()
+   * ```
+   *
+   * The table has to exist, and its columns are read here, so a
+   * table nothing declares and a column of a type the ingest cannot
+   * carry are both refused at this call rather than at the flush a
+   * million rows later.
+   */
+  appender(table: string): Promise<Appender>
   /**
    * Runs one statement and gives back its rows.
    *

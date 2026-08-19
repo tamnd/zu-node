@@ -124,6 +124,34 @@ export type ZuParam =
   | { [field: string]: ZuParam }
 
 /**
+ * A value an appender takes, which is narrower than what a statement
+ * takes.
+ *
+ * A column of an appender has one type, read from the table when the
+ * appender opened, and every value in it is that type. So there is no
+ * `null` here: a column that holds nulls cannot be appended to at all
+ * and the appender says so when it opens, and `undefined` in a row is a
+ * value the caller forgot rather than a null they meant. There are no
+ * lists and no objects either, because a property column holds a scalar.
+ *
+ * BYTES is a `Uint8Array`, which is the one type here that no statement
+ * parameter can be, and INT64 is a `bigint` or a whole `number` below
+ * 2^53. A number past that is refused rather than rounded, because past
+ * 2^53 a number no longer names one integer.
+ */
+export type ZuAppendValue =
+  | boolean
+  | number
+  | bigint
+  | string
+  | Uint8Array
+  | ZuDate
+  | ZuTime
+  | ZuTimestamp
+  | ZuDuration
+  | ZuTemporalValue
+
+/**
  * A walk through the graph: nodes and edges, alternating, a node at
  * each end.
  *

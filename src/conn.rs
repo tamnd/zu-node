@@ -32,6 +32,7 @@ use napi_derive::napi;
 use zudb::query::{QueryResult, Value};
 use zudb::{Config, Database, DiagnosticRecord, Interrupt, ZuError};
 
+use crate::append::OpenTask;
 use crate::cancel::Watch;
 use crate::error::{aborted, raise, usage};
 use crate::stream::{self, Started, ZuCursor};
@@ -367,6 +368,38 @@ impl Connection {
             false => Some(CLOSED.to_string()),
         };
         AsyncTask::new(self.start(read_only, refused))
+    }
+
+    /// Opens an appender on `table` and hands it back.
+    ///
+    /// The bulk-load path. A load written as statements pays a commit
+    /// per row, and an appender pays one per flush, which is the whole
+    /// difference between loading a million rows in an afternoon and
+    /// loading them in a minute.
+    ///
+    /// ```js
+    /// await using rows = await conn.appender('person')
+    /// for (const [id, name] of people) rows.appendRow([id, name])
+    /// await rows.flush()
+    /// ```
+    ///
+    /// The table has to exist, and its columns are read here, so a
+    /// table nothing declares and a column of a type the ingest cannot
+    /// carry are both refused at this call rather than at the flush a
+    /// million rows later.
+    #[napi(ts_args_type = "table: string", ts_return_type = "Promise<Appender>")]
+    pub fn appender(&self, table: Unknown<'_>) -> AsyncTask<OpenTask> {
+        let named = match self.alive.load(Ordering::Acquire) {
+            true => text(&table, "table"),
+            false => Err(CLOSED.to_string()),
+        };
+        AsyncTask::new(OpenTask::new(
+            Arc::clone(&self.inner),
+            Arc::clone(&self.alive),
+            Arc::clone(&self.in_txn),
+            named.as_deref().unwrap_or_default().to_string(),
+            named.err(),
+        ))
     }
 
     /// The task that starts one, whether or not it is going to work.

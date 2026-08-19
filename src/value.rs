@@ -827,7 +827,7 @@ fn from_object(env: &Env, name: &str, value: Unknown<'_>, depth: usize) -> Resul
 /// is one of its own rather than by reading a tag off the object.
 /// A plain object shaped like a date is a record, and only an instance
 /// is a date.
-fn temporal_from(env: &Env, value: &Unknown<'_>) -> Result<Option<Temporal>> {
+pub(crate) fn temporal_from(env: &Env, value: &Unknown<'_>) -> Result<Option<Temporal>> {
     if ZuDate::instance_of(env, value)? {
         let days: i32 = Object::from_unknown(*value)?.get_named_property("days")?;
         return Ok(Some(Temporal::Date(days)));

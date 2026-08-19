@@ -71,6 +71,7 @@
     "check:api:update": "api-extractor run --local",
     "reference": "node tools/reference.mjs reference",
     "bench": "node bench/query.mjs",
+    "bench:append": "node bench/append.mjs",
     "bench:temporal": "node --harmony-temporal bench/query.mjs"
   },
   "devDependencies": {

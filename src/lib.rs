@@ -16,6 +16,8 @@
 //! ABI has nothing to say about and a JavaScript program cannot do
 //! without.
 
+mod append;
+mod buffer;
 mod cancel;
 mod conn;
 mod error;

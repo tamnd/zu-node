@@ -23,6 +23,7 @@ const SURFACE = [
   'isZuError',
   'Connection',
   'Transaction',
+  'Appender',
   'ZuStream',
   'ZuCursor',
   'ZuDate',

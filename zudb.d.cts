@@ -42,6 +42,17 @@ declare module './binding.cjs' {
    * spelling and the commit the word a caller writes.
    */
   interface Transaction extends AsyncDisposable {}
+
+  /**
+   * The disposal of an appender, declared here for the same reason the
+   * other two are.
+   *
+   * It flushes, which is the opposite of what a transaction's does. A
+   * buffer that left its scope unwritten would be a loader that read a
+   * million rows and threw them away, and `discard()` is there for the
+   * caller who meant exactly that.
+   */
+  interface Appender extends AsyncDisposable {}
 }
 
 /**
