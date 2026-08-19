@@ -433,6 +433,143 @@ export interface ZuSummary {
 }
 
 /**
+ * One operator of a plan, and everything under it.
+ *
+ * The tree runs the way the rows do: a parent pulls from its children,
+ * so the leaves are the scans and the root is whatever the statement
+ * ends with.
+ */
+export interface ZuPlanNode {
+  /** The operator: `Scan`, `Expand`, `Filter`, `Project` and the rest. */
+  readonly op: string
+  /**
+   * What the listing calls it, which is `op` with the bracket in front
+   * of it where there is one, so an OPTIONAL MATCH expand is an
+   * `Expand` named `OptionalExpand`.
+   */
+  readonly name: string
+  /** The bracket this operator is inside, and null for a plain match. */
+  readonly bracket: 'Optional' | 'Semi' | 'Anti' | 'Mark' | null
+  /**
+   * What it is working on, written the way the statement wrote it: the
+   * tables a scan reads, the pattern an expand walks, the predicate a
+   * filter asks. Empty where the operator has nothing to name.
+   */
+  readonly detail: string
+  /** The variables it introduces, in the order it binds them. */
+  readonly binds: string[]
+  /**
+   * The tables it touches: node tables for a scan, rel tables for an
+   * expand, both for an insert, and none anywhere else.
+   */
+  readonly tables: string[]
+  readonly children: ZuPlanNode[]
+}
+
+/**
+ * A query written where a value belongs, planned on its own.
+ *
+ * `reads` is what it reads from the query around it, and empty is the
+ * whole test for whether it runs once: a subquery that reads nothing
+ * answers the same value for every row, and one that reads a name runs
+ * per row. `exists` is true where what was written around it asks only
+ * whether it answered a row.
+ */
+export interface ZuScalarPlan {
+  readonly reads: string[]
+  readonly exists: boolean
+  readonly plan: ZuPlan
+}
+
+/**
+ * What a statement would do, without doing it.
+ *
+ * A tree and a rendering of it. `text` is what the engine prints, so a
+ * listing logged from Node is the listing the shell shows, and the tree
+ * is for the questions a program asks: which tables were touched, how
+ * deep the expands go, whether the scan reached an index.
+ */
+export interface ZuPlan {
+  /**
+   * The top operator, and null for the plan with no operators at all,
+   * which is the one row a statement with no clauses runs over.
+   */
+  readonly root: ZuPlanNode | null
+  /** The columns the statement answers with, in the order it wrote them. */
+  readonly columns: string[]
+  /** The parameters it wants, without the `$` they are written with. */
+  readonly params: string[]
+  /** What compiling it raised, which is empty for most statements. */
+  readonly notes: string[]
+  readonly scalars: ZuScalarPlan[]
+  /** The listing, indented, as `EXPLAIN` prints it. */
+  readonly text: string
+}
+
+/**
+ * One operator of a profiled run, and what the counters saw of it.
+ */
+export interface ZuOp {
+  readonly op: string
+  readonly detail: string
+  /** How many chunks it produced. */
+  readonly pulls: number
+  /** Values produced across every pull. Over `pulls` that is the
+   * average vector length, which is the factorization statistic. */
+  readonly rows: number
+  /**
+   * The rows those values stand for with the factorization multiplied
+   * out. On a chain it is `rows`, and on a star it is the product over
+   * every vector still unflat beside this one, which is the count the
+   * optimizer was estimating.
+   */
+  readonly flat: number
+  /**
+   * What the optimizer expected, and null for the operators that pass
+   * their input through rather than producing rows of their own.
+   */
+  readonly estimate: number | null
+  /** The most rows the optimizer's ceiling allowed, where the
+   * statistics were there to set one. */
+  readonly bound: number | null
+  /** Self time in nanoseconds, with the children's excluded. */
+  readonly nanos: number
+  /**
+   * How wrong the estimate was: `max(estimate/rows, rows/estimate)`,
+   * both floored at one row. An operator the optimizer got right is 1,
+   * and null wherever `estimate` is.
+   */
+  readonly qerror: number | null
+}
+
+/**
+ * One stage of a profiled run: the operators bottom-up and the sink
+ * that took their rows.
+ */
+export interface ZuStage {
+  readonly sink: string
+  /** How many rows the sink was handed. */
+  readonly rows: number
+  /** Wall time of the whole stage in nanoseconds, sink included. */
+  readonly nanos: number
+  readonly ops: ZuOp[]
+}
+
+/**
+ * What a statement did, with the counters on.
+ *
+ * The rows are not here: a profile is about the run rather than the
+ * answer, and keeping both would make the measurement pay for the thing
+ * it is measuring. `text` is the listing `EXPLAIN ANALYZE` prints.
+ */
+export interface ZuProfile {
+  readonly stages: ZuStage[]
+  /** Every stage end to end, in nanoseconds. */
+  readonly nanos: number
+  readonly text: string
+}
+
+/**
  * What a streamed statement takes beside its parameters.
  */
 export interface ZuStreamOptions extends ZuStatementOptions {

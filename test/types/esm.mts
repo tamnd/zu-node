@@ -17,8 +17,11 @@ import {
   type ZuFrameColumn,
   type ZuColumn,
   type ZuColumnar,
+  type Prepared,
   type ZuLoadStats,
   type ZuPlainDate,
+  type ZuPlan,
+  type ZuPlanNode,
   type ZuRows,
   type ZuStream,
   type ZuSummary,
@@ -246,4 +249,38 @@ export async function totals(path: string): Promise<bigint> {
   const rows: number = read.rows
   if (read.gqlstatus !== '00000') throw new Error(read.gqlstatus)
   return total + BigInt(rows) + BigInt(column.nulls)
+}
+
+export async function repeated(path: string, names: string[]): Promise<bigint[]> {
+  await using conn = await connect(path, { readOnly: true })
+
+  // A prepared statement is disposable too, and the row type goes on
+  // the run rather than on the prepare, because one statement answers
+  // whatever the projection says and the projection is in the text.
+  await using find: Prepared = await conn.prepare(
+    'MATCH (p:person) WHERE p.name = $name RETURN p.id AS id',
+  )
+
+  // The names it wants, which is the half of a prepared statement that
+  // is not just a faster `query`.
+  const wanted: string[] = find.params
+  if (wanted.length !== 1) throw new Error('the statement changed shape')
+
+  const out: bigint[] = []
+  for (const name of names) {
+    const rows = await find.query<{ id: bigint }>({ name })
+    for (const row of rows) out.push(row.id)
+  }
+  return out
+}
+
+export async function scans(path: string): Promise<boolean> {
+  await using conn = await connect(path, { readOnly: true })
+  const plan: ZuPlan = await conn.explain('MATCH (p:person) RETURN p.id AS id')
+
+  // The root is nullable, since a statement can compile to no operator
+  // at all, so walking the tree without asking does not compile.
+  const walk = (node: ZuPlanNode): boolean =>
+    node.op === 'ScanNodes' || node.children.some(walk)
+  return plan.root === null ? false : walk(plan.root)
 }

@@ -36,6 +36,8 @@ use crate::append::OpenTask;
 use crate::cancel::Watch;
 use crate::columns::ColumnsTask;
 use crate::error::{aborted, raise, usage};
+use crate::plan::{PlanTask, ProfileTask};
+use crate::prepared::PrepareTask;
 use crate::register::{self, RegisterTask, RegisteredTask, UnregisterTask};
 use crate::stream::{self, Started, ZuCursor};
 use crate::temporal;
@@ -573,6 +575,136 @@ impl Connection {
         AsyncTask::new(ColumnsTask(self.task(env, statement, params, options)))
     }
 
+    /// Compiles a statement, pins it, and hands back something that
+    /// runs it.
+    ///
+    /// ```js
+    /// await using find = await conn.prepare('MATCH (p:person) WHERE p.id = $id RETURN p.name AS name')
+    /// for (const id of ids) console.log(await find.query({ id }))
+    /// ```
+    ///
+    /// What this buys is not what it buys in a driver. A driver prepares
+    /// to save a round trip and this database has none, and the plan for
+    /// a statement is cached by its text either way, so a loop that
+    /// writes the same query twice is not compiling it twice whether or
+    /// not anybody prepared it. What preparing buys here is the compile
+    /// happening at the line that asked for it, so a statement that does
+    /// not compile is a failure at startup rather than on the first
+    /// request that used it, and the parameter names coming back, so a
+    /// program can bind by what the statement actually wants rather than
+    /// by what somebody remembered writing.
+    ///
+    /// The id maps back to the text rather than to a plan, so a prepared
+    /// statement crossing a catalog change recompiles instead of running
+    /// a plan for a table that has since changed shape.
+    #[napi(
+        ts_args_type = "statement: string",
+        ts_return_type = "Promise<Prepared>"
+    )]
+    pub fn prepare(&self, statement: Unknown<'_>) -> AsyncTask<PrepareTask> {
+        let named = match self.alive.load(Ordering::Acquire) {
+            true => text(&statement, "statement"),
+            false => Err(CLOSED.to_string()),
+        };
+        AsyncTask::new(PrepareTask::new(
+            self.handles(),
+            self.interrupt.clone(),
+            self.spelling,
+            named.as_deref().unwrap_or_default().to_string(),
+            named.err(),
+        ))
+    }
+
+    /// The plan this connection would run for a statement, without
+    /// running it.
+    ///
+    /// ```js
+    /// const plan = await conn.explain('MATCH (p:person) WHERE p.id = $id RETURN p.name AS name')
+    /// console.log(plan.text)
+    /// ```
+    ///
+    /// A tree and a rendering of it, because the two questions a plan
+    /// gets asked want different things: a person reading it wants the
+    /// listing, and a program asking whether the scan reached an index
+    /// or which tables were touched wants operators it can walk. They
+    /// are one plan printed two ways rather than two answers that can
+    /// drift, since `text` is what the engine renders from the same
+    /// tree.
+    ///
+    /// No parameters, because a plan does not depend on the values bound
+    /// to it: it depends on the names, and those are in `params`. A
+    /// statement that does not compile fails here, which is most of why
+    /// this is worth calling.
+    #[napi(ts_args_type = "statement: string", ts_return_type = "Promise<ZuPlan>")]
+    pub fn explain(&self, statement: Unknown<'_>) -> AsyncTask<PlanTask> {
+        let named = match self.alive.load(Ordering::Acquire) {
+            true => text(&statement, "statement"),
+            false => Err(CLOSED.to_string()),
+        };
+        AsyncTask::new(PlanTask::new(
+            self.handles(),
+            named.as_deref().unwrap_or_default().to_string(),
+            named.err(),
+        ))
+    }
+
+    /// Runs a statement with the counters on and gives back what they
+    /// saw, rather than the rows.
+    ///
+    /// ```js
+    /// const run = await conn.profile('MATCH (p:person)-[:knows]->(q) RETURN q.name AS name')
+    /// console.log(run.text)
+    /// ```
+    ///
+    /// This is the call for a statement that is slower than its plan
+    /// says it should be. Every operator carries what it really
+    /// produced beside what the optimizer expected, and `qerror` is the
+    /// ratio between them, so the operator whose estimate was wrong is
+    /// the one to look at and `nanos` says whether being wrong cost
+    /// anything.
+    ///
+    /// It costs the execution, since the way to find out what a
+    /// statement does is to do it. A statement that writes is refused,
+    /// because profiling it would apply the write.
+    #[napi(
+        ts_args_type = "statement: string, params?: Record<string, ZuParam> | null, options?: ZuStatementOptions | null",
+        ts_return_type = "Promise<ZuProfile>"
+    )]
+    pub fn profile(
+        &self,
+        env: &Env,
+        statement: Unknown<'_>,
+        params: Option<Unknown<'_>>,
+        options: Option<Object<'_>>,
+    ) -> AsyncTask<ProfileTask> {
+        // Read here rather than on the threadpool thread, for the reason
+        // every other statement's are: reading a JavaScript value is
+        // something only the thread that owns the runtime may do, and so
+        // is adding the listener the signal is watched through.
+        let bound = if self.alive.load(Ordering::Acquire) {
+            text(&statement, "statement").and_then(|statement| {
+                Ok((
+                    statement,
+                    bind(env, params)?,
+                    watch(env, options, self.interrupt.clone())?,
+                ))
+            })
+        } else {
+            Err(CLOSED.to_string())
+        };
+        let (statement, params, watch, refused) = match bound {
+            Ok((statement, params, watch)) => (statement, params, watch, None),
+            Err(message) => (String::new(), Vec::new(), None, Some(message)),
+        };
+        AsyncTask::new(ProfileTask::new(
+            self.handles(),
+            statement,
+            params,
+            watch,
+            refused,
+        ))
+    }
+
     /// Runs one statement and gives back a cursor over its rows.
     ///
     /// The pull underneath `stream`, which is what a program uses. The
@@ -680,15 +812,22 @@ impl Connection {
                 Some(message),
             ),
         };
-        QueryTask {
-            inner: Arc::clone(&self.inner),
-            alive: Arc::clone(&self.alive),
-            in_txn: Arc::clone(&self.in_txn),
-            statement,
+        QueryTask::new(
+            self.handles(),
+            Source::Text(statement),
             params,
             spelling,
             watch,
             refused,
+        )
+    }
+
+    /// The three handles a call on this connection runs against.
+    pub(crate) fn handles(&self) -> Handles {
+        Handles {
+            inner: Arc::clone(&self.inner),
+            alive: Arc::clone(&self.alive),
+            in_txn: Arc::clone(&self.in_txn),
         }
     }
 
@@ -952,7 +1091,10 @@ fn flag(options: Option<&Object<'_>>, name: &str) -> std::result::Result<Option<
 /// otherwise again, because the reason to ask for numbers is usually
 /// one query whose rows are about to be serialized rather than a whole
 /// program's worth of them.
-fn int_mode(options: Option<&Object<'_>>, connection: Ints) -> std::result::Result<Ints, String> {
+pub(crate) fn int_mode(
+    options: Option<&Object<'_>>,
+    connection: Ints,
+) -> std::result::Result<Ints, String> {
     let Some(options) = options else {
         return Ok(connection);
     };
@@ -1052,6 +1194,32 @@ pub(crate) fn bind(
     Ok(bound)
 }
 
+/// What a task runs: the text of a statement, or the id a prepared one
+/// was pinned under.
+///
+/// One enum rather than two tasks, because everything after the call
+/// that starts a statement is the same either way: the same lock, the
+/// same signal, the same rows, the same columns. So `query`, `exec` and
+/// `columnar` are written once and a prepared statement reaches all
+/// three by handing them an id instead of a string.
+pub(crate) enum Source {
+    Text(String),
+    Prepared(u64),
+}
+
+/// The three handles every call on a connection runs against.
+///
+/// They are counted rather than borrowed because the threadpool thread
+/// a statement runs on takes a share of each: a prepared statement, an
+/// appender and a task all outlive the call that made them in the type
+/// system even though none of them does in fact.
+#[derive(Clone)]
+pub(crate) struct Handles {
+    pub(crate) inner: Arc<Mutex<Option<zudb::Connection>>>,
+    pub(crate) alive: Arc<AtomicBool>,
+    pub(crate) in_txn: Arc<AtomicBool>,
+}
+
 pub struct QueryTask {
     inner: Arc<Mutex<Option<zudb::Connection>>>,
     /// Whether the connection is still open, which is what tells an
@@ -1060,7 +1228,7 @@ pub struct QueryTask {
     /// Where this statement writes whether the connection is inside a
     /// transaction now that it has run.
     in_txn: Arc<AtomicBool>,
-    statement: String,
+    source: Source,
     params: Vec<(String, Value)>,
     /// How this statement spells the values it gives back.
     spelling: Spelling,
@@ -1071,6 +1239,27 @@ pub struct QueryTask {
 }
 
 impl QueryTask {
+    /// One statement, ready to run or ready to say why it will not.
+    pub(crate) fn new(
+        handles: Handles,
+        source: Source,
+        params: Vec<(String, Value)>,
+        spelling: Spelling,
+        watch: Option<Watch>,
+        refused: Option<String>,
+    ) -> QueryTask {
+        QueryTask {
+            inner: handles.inner,
+            alive: handles.alive,
+            in_txn: handles.in_txn,
+            source,
+            params,
+            spelling,
+            watch,
+            refused,
+        }
+    }
+
     /// Runs the statement, with the names of the tables it saw.
     ///
     /// The names are read while the lock is held, because a catalog
@@ -1080,8 +1269,8 @@ impl QueryTask {
         if let Some(message) = self.refused.take() {
             return Err(Failure::Usage(message));
         }
-        let (statement, params, spelling, watch) =
-            (&self.statement, &self.params, self.spelling, &self.watch);
+        let (source, params, spelling, watch) =
+            (&self.source, &self.params, self.spelling, &self.watch);
         with(&self.inner, &self.alive, &self.in_txn, move |conn| {
             // From here the connection is this statement's, so this is
             // where a signal can start stopping it and where it stops
@@ -1099,7 +1288,14 @@ impl QueryTask {
                 .map(|(name, value)| (name.as_str(), value.clone()))
                 .collect();
             let shape = Shape::of(conn.session_mut().catalog(), spelling);
-            let result = conn.query_with(statement, &params);
+            let result = match source {
+                Source::Text(statement) => conn.query_with(statement, &params),
+                // The id maps back to the text the session pinned, so a
+                // catalog change between the prepare and this recompiles
+                // rather than running a plan that describes a table that
+                // has since changed shape.
+                Source::Prepared(id) => conn.execute_prepared(*id, &params),
+            };
             if let Some(watch) = watch {
                 watch.leave();
                 // An interrupt is the engine's answer to somebody having
@@ -1217,7 +1413,7 @@ pub(crate) fn beside<T: ToNapiValue>(env: &Env, name: &str, value: T) -> Result<
 }
 
 /// The same statement with the rows thrown away.
-pub struct ExecTask(QueryTask);
+pub struct ExecTask(pub(crate) QueryTask);
 
 impl<'task> ScopedTask<'task> for ExecTask {
     type Output = std::result::Result<(), Failure>;

@@ -166,6 +166,7 @@ module.exports = {
   Connection: binding.Connection,
   Transaction: binding.Transaction,
   Appender: binding.Appender,
+  Prepared: binding.Prepared,
   ZuStream,
   // The pull underneath a stream, which `conn.cursor(...)` hands back
   // and almost nobody should be holding. It is here because it is in

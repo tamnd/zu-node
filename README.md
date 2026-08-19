@@ -36,7 +36,7 @@ The rows are an array, so iterating them is `for (const row of rows)` and nothin
 
 ## What works today
 
-`connect`, `query`, `exec`, `stream`, `close`, `dispose` and `await using`. Named parameters both ways, including lists, records and nesting. Every scalar the engine has, plus nodes, edges and paths with their tables named rather than numbered, and `ZuDate`, `ZuTime`, `ZuTimestamp` and `ZuDuration`, with `{ temporal: true }` and `toTemporal()` for the runtimes that have `Temporal`. Read-only connections, memory and thread limits. `bigIntMode`, per statement or per connection. An `AbortSignal` on any statement. The full error surface above, and `isZuError` to recognize it. Streaming, as an async iterable, as batches and as a Web Stream. Transactions, with `inTransaction` on the connection. An appender, for loading rows a batch at a time, and `load` for building a whole database out of columns and an edge list. Registered frames, so an Arrow table or an object of typed arrays is something a statement can match on without the rows being copied. `columnar`, for a result read down its columns as the buffers themselves rather than across its rows as objects. Both module formats, typed separately.
+`connect`, `query`, `exec`, `stream`, `close`, `dispose` and `await using`. Named parameters both ways, including lists, records and nesting. Every scalar the engine has, plus nodes, edges and paths with their tables named rather than numbered, and `ZuDate`, `ZuTime`, `ZuTimestamp` and `ZuDuration`, with `{ temporal: true }` and `toTemporal()` for the runtimes that have `Temporal`. Read-only connections, memory and thread limits. `bigIntMode`, per statement or per connection. An `AbortSignal` on any statement. The full error surface above, and `isZuError` to recognize it. Streaming, as an async iterable, as batches and as a Web Stream. Transactions, with `inTransaction` on the connection. An appender, for loading rows a batch at a time, and `load` for building a whole database out of columns and an edge list. Registered frames, so an Arrow table or an object of typed arrays is something a statement can match on without the rows being copied. `columnar`, for a result read down its columns as the buffers themselves rather than across its rows as objects. Prepared statements, compiled at the line that asked and run as often as wanted, and `explain` and `profile`, as a tree a program walks and as the listing a person reads. Both module formats, typed separately.
 
 Build it with `npm run build`, and run the suite with `npm test`. Nothing is published yet, so `npm i zudb` is not a thing you can type at anybody's terminal, but everything it will do is built and installed on every run of the release workflow.
 
@@ -240,6 +240,66 @@ Two things are not buffers, and both are named by the type rather than found out
 
 `bigIntMode` says nothing here. A columnar read has one physical layout per type and an INT64 column is 64 bit cells however a caller would rather read one, which is the difference between a buffer and a value. The mode still decides what is inside `items`, where this client is making objects anyway.
 
+## Preparing a statement
+
+`conn.prepare` compiles a statement now and hands back something that runs it later, as often as it is asked to, with different values bound each time:
+
+```ts
+await using find = await conn.prepare(`MATCH (p:person) WHERE p.name = $name RETURN p.id AS id`);
+find.params; // ["name"], which the statement asked for and nobody had to read out of it
+const ada = await find.query<{ id: bigint }>({ name: "ada" });
+const zoe = await find.query<{ id: bigint }>({ name: "zoe" });
+```
+
+It answers the same three ways a connection does. `query` gives rows, `exec` gives nothing and is for a statement written to change something, and `columnar` gives the buffers. Each takes the bindings and the same options a statement takes, so a signal and a `bigIntMode` go on the run rather than on the prepare, since which run a caller wants to stop is a property of that run.
+
+What this is not is a speedup, and it is worth saying so here rather than letting a reader assume the thing every other client's documentation says. A driver prepares to save a round trip to a server, and there is no server and no round trip here. The engine already caches the plan for a statement by its text, so the second `conn.query` of the same string is not compiled a second time either. On this machine, with `npm run bench:prepared` over 100 rows and 5000 runs:
+
+```
+prepared, bound per run                     13756 ns each
+the same text, bound per run                13812 ns each
+a new text per run                          21209 ns each
+```
+
+The first two are the same number, and that is the honest result. The third is the one to read: a statement whose text is different every run, which is what a program that pastes its values into the string is writing, pays the compile every time, and the roughly 7 microseconds between it and the other two is the size of that mistake. `prepare` and `close` together cost 10 microseconds, which is that same compile bought once.
+
+So what preparing buys is two things, and neither of them is throughput. The compile happens at the line that asked for it, at startup, where a statement that does not compile fails on the way up rather than on the first request that needed it. And the names come back: `params` is what the statement wants bound, in the order the engine found them, which is how a layer that binds from a record knows what to look for. `statement` is the text it was given back, and `closed` says whether it still holds anything.
+
+A prepared statement holds an id on the connection that made it, so closing it gives that back. `await using` is the intended scoping, `close()` is there for callers who cannot use the syntax, closing twice is not an error, and every run after the close is refused with the reason. One whose connection closed first is refused too, saying the connection is closed, because the session that was holding the id went with it. There is no `stream` on a prepared statement, deliberately: the engine's streaming path takes a text rather than a pinned id, so a streamed prepared statement would be this client quietly running the text again behind the caller, and a method that does not do what its name says is worse than one that is not there.
+
+## Seeing what a statement will do
+
+`explain` compiles a statement and answers the plan without running it:
+
+```ts
+const plan = await conn.explain(`MATCH (p:person) WHERE p.name = $name RETURN p.id AS id`);
+plan.columns; // ["id"]
+plan.params; // ["name"]
+plan.root.op; // "Project"
+plan.root.children[0].detail; // "p.name = $name"
+console.log(plan.text);
+// Project p.id AS id
+//   Filter p.name = $name
+//     ScanNodes p: person
+```
+
+It comes back twice on purpose. `root` is the tree, for a program: every operator carries `op`, the `detail` it works on, the `binds` it introduces, the `tables` it touches, and its `children`, so a test can assert that a scan became an index seek without matching on a string. `text` is the engine's own listing, for a person, and it is the engine's rather than this client's rendering of the tree so the two cannot drift apart from one release to the next. An operator inside a bracket says which one it is in, `Optional`, `Semi`, `Anti` or `Mark`, and `name` is what the listing calls it, which for an expand inside an optional match is `OptionalExpand` while `op` stays `Expand`.
+
+`explain` takes no parameters, and that is not an oversight. A plan is chosen from the shape of the statement, and the values are bound when it runs, so a plan asked for with values would suggest that the values changed it. `scalars` is the other half of that: a query written where a value belongs gets a plan of its own, and `reads` says which variables of the query around it that plan reads, which is the whole difference between a subquery that runs once and one that runs once a row.
+
+`profile` runs the statement and answers what the operators actually did:
+
+```ts
+const run = await conn.profile(`MATCH (p:person) RETURN p.name AS name`, { since: 1990 });
+const scan = run.stages[0].ops.find((op) => op.op === "Scan");
+scan.rows; // what it really produced
+scan.estimate; // what the optimizer thought, or null if it had nothing to say
+scan.qerror; // the two divided, the way the literature writes it
+run.nanos; // every stage added up
+```
+
+A profile takes bindings, since it is a run. Every count is a `number` and not a `bigint`, which is the one place in this client an integer is spelled as a double on purpose: nothing a profile counts, not rows, not pulls, not nanoseconds of a statement anybody waited for, comes anywhere near 2^53, and a caller doing arithmetic on a measurement should not have to convert first. `pulls` is how many times the operator above asked, `rows` is how many it answered, `flat` is the same count with vectors unpacked, `bound` is the upper bound the optimizer had, and `qerror` is null where an estimate was. A statement that writes is refused rather than profiled, saying so, because a profile that also inserted two rows is a measurement that changed the thing measured.
+
 ## Asking for numbers instead of bigints
 
 `bigIntMode` says how INT64 is spelled on the way out. It goes on one statement, or on a connection for all of them, and a statement on a connection that named one may still name the other:
@@ -332,7 +392,7 @@ typedoc rather than api-documenter, which would have been the obvious pick since
 
 Anything outside that table has no binary and no source build to fall back on, so the install resolves nothing and the first `require` says so. The browser and the platforms nobody builds for are what the WASM target answers, later.
 
-`npm run bench` measures what this package adds to the engine, which is a row object and one JavaScript value per column: the same scan with the rows dropped is the floor, and the difference between the two is what the boundary costs. Run it against a release build, since a debug build of the engine moves the floor by an order of magnitude and not the rest of it. `npm run bench:append` does the same for the appender, `npm run bench:load` for building a database out of columns, `npm run bench:register` for registered frames, where what is being watched is that the registration does not scale with the rows, and `npm run bench:columnar` for a result read down its columns against the same result read across its rows.
+`npm run bench` measures what this package adds to the engine, which is a row object and one JavaScript value per column: the same scan with the rows dropped is the floor, and the difference between the two is what the boundary costs. Run it against a release build, since a debug build of the engine moves the floor by an order of magnitude and not the rest of it. `npm run bench:append` does the same for the appender, `npm run bench:load` for building a database out of columns, `npm run bench:register` for registered frames, where what is being watched is that the registration does not scale with the rows, `npm run bench:columnar` for a result read down its columns against the same result read across its rows, and `npm run bench:prepared` for a prepared statement against the same text run again and against a text that is new every time, which is the one of these whose interesting number is that the first two are equal.
 
 ## Still to come
 

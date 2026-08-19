@@ -12,6 +12,7 @@ import {
   type ZuColumnType,
   type ZuLoadOptions,
   type ZuParam,
+  type ZuProfile,
   type ZuStream,
   type ZuTransactionOptions,
 } from 'zudb'
@@ -139,4 +140,31 @@ export async function shapes(path: string): Promise<ZuColumnType[]> {
 
   await conn.close()
   return read.columns.map((column) => column.type)
+}
+
+export async function measured(path: string, name: string): Promise<number> {
+  const conn = await connect(path, { readOnly: true })
+  try {
+    const run: ZuProfile = await conn.profile(
+      'MATCH (p:person) WHERE p.name = $name RETURN p.id AS id',
+      { name },
+      { signal: AbortSignal.timeout(50) },
+    )
+
+    // Every count here is a number and not a bigint, which is the one
+    // place this package spells an integer as a double on purpose, so
+    // adding them up needs no conversion anywhere.
+    let rows = 0
+    for (const stage of run.stages) {
+      rows += stage.rows
+      for (const op of stage.ops) {
+        // The estimate and the q-error are null where the optimizer had
+        // nothing to say, so using one without asking does not compile.
+        if (op.estimate !== null && op.qerror !== null) rows += op.qerror > 10 ? 1 : 0
+      }
+    }
+    return rows + run.nanos
+  } finally {
+    conn.close()
+  }
 }

@@ -32,9 +32,12 @@ export class Connection {
     cursor(statement: string, params?: Record<string, ZuParam> | null, options?: ZuStreamOptions | null): ZuCursor
     dispose(): Promise<void>
     exec(statement: string, params?: Record<string, ZuParam> | null, options?: ZuStatementOptions | null): Promise<void>
+    explain(statement: string): Promise<ZuPlan>
     get inTransaction(): boolean
     get open(): boolean
     get path(): string
+    prepare(statement: string): Promise<Prepared>
+    profile(statement: string, params?: Record<string, ZuParam> | null, options?: ZuStatementOptions | null): Promise<ZuProfile>
     query<Row = Record<string, ZuValue>>(statement: string, params?: Record<string, ZuParam> | null, options?: ZuStatementOptions | null): Promise<ZuRows<Row>>
     get readOnly(): boolean
     register(name: string, data: ZuFrame): Promise<number>
@@ -57,6 +60,18 @@ export function isZuError(value: unknown): value is ZuError
 
 // @public
 export function load(path: string, options: ZuLoadOptions): Promise<ZuLoadStats>
+
+// @public
+export class Prepared {
+    close(): Promise<void>
+    get closed(): boolean
+    columnar(params?: Record<string, ZuParam> | null, options?: ZuStatementOptions | null): Promise<ZuColumnar>
+    dispose(): Promise<void>
+    exec(params?: Record<string, ZuParam> | null, options?: ZuStatementOptions | null): Promise<void>
+    get params(): Array<string>
+    query<Row = Record<string, ZuValue>>(params?: Record<string, ZuParam> | null, options?: ZuStatementOptions | null): Promise<ZuRows<Row>>
+    get statement(): string
+}
 
 // @public
 export class Transaction {
@@ -262,6 +277,21 @@ export interface ZuNotice {
 }
 
 // @public
+export interface ZuOp {
+    readonly bound: number | null
+    // (undocumented)
+    readonly detail: string
+    readonly estimate: number | null
+    readonly flat: number
+    readonly nanos: number
+    // (undocumented)
+    readonly op: string
+    readonly pulls: number
+    readonly qerror: number | null
+    readonly rows: number
+}
+
+// @public
 export type ZuParam =
 | null
 | undefined
@@ -307,6 +337,38 @@ export type ZuPlainTime = typeof globalThis extends {
 : unknown
 
 // @public
+export interface ZuPlan {
+    readonly columns: string[]
+    readonly notes: string[]
+    readonly params: string[]
+    readonly root: ZuPlanNode | null
+    // (undocumented)
+    readonly scalars: ZuScalarPlan[]
+    readonly text: string
+}
+
+// @public
+export interface ZuPlanNode {
+    readonly binds: string[]
+    readonly bracket: 'Optional' | 'Semi' | 'Anti' | 'Mark' | null
+    // (undocumented)
+    readonly children: ZuPlanNode[]
+    readonly detail: string
+    readonly name: string
+    readonly op: string
+    readonly tables: string[]
+}
+
+// @public
+export interface ZuProfile {
+    readonly nanos: number
+    // (undocumented)
+    readonly stages: ZuStage[]
+    // (undocumented)
+    readonly text: string
+}
+
+// @public
 export class ZuRel {
     // (undocumented)
     get dst(): bigint
@@ -327,6 +389,26 @@ export interface ZuRows<Row = Record<string, ZuValue>> extends Array<Row> {
     readonly gqlstatus: string
     // (undocumented)
     readonly notices: ZuNotice[]
+}
+
+// @public
+export interface ZuScalarPlan {
+    // (undocumented)
+    readonly exists: boolean
+    // (undocumented)
+    readonly plan: ZuPlan
+    // (undocumented)
+    readonly reads: string[]
+}
+
+// @public
+export interface ZuStage {
+    readonly nanos: number
+    // (undocumented)
+    readonly ops: ZuOp[]
+    readonly rows: number
+    // (undocumented)
+    readonly sink: string
 }
 
 // @public
