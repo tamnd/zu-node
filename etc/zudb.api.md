@@ -31,6 +31,7 @@ export class Connection {
     columnar(statement: string, params?: Record<string, ZuParam> | null, options?: ZuStatementOptions | null): Promise<ZuColumnar>
     cursor(statement: string, params?: Record<string, ZuParam> | null, options?: ZuStreamOptions | null): ZuCursor
     dispose(): Promise<void>
+    duplicate(): Promise<Connection>
     exec(statement: string, params?: Record<string, ZuParam> | null, options?: ZuStatementOptions | null): Promise<void>
     explain(statement: string): Promise<ZuPlan>
     get inTransaction(): boolean

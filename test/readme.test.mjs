@@ -81,7 +81,7 @@ async function installed(t, program) {
 }
 
 test('the README prints programs and fragments and knows which is which', async () => {
-  assert.equal((await programs()).length, 3, "the README's whole programs")
+  assert.equal((await programs()).length, 4, "the README's whole programs")
   assert.ok((await blocks('ts')).length > (await programs()).length, 'and its fragments')
 })
 
@@ -113,6 +113,19 @@ test('the program with no path leaves the directory empty', { skip: !NODE }, asy
 
   assert.equal(stdout.trim(), 'ada')
   assert.deepEqual(await readdir(dir), ['main.ts', 'node_modules', 'package.json'].sort())
+})
+
+test('the duplicate program runs as printed', { skip: !NODE }, async (t) => {
+  const program = (await programs()).find((block) => block.includes('conn.duplicate()'))
+  assert.ok(program, 'the block that makes a second connection')
+
+  const { dir, file } = await installed(t, program)
+  const { stdout } = await run(process.execPath, [file], { cwd: dir })
+
+  // The database it makes is empty, so the count is the honest zero
+  // rather than a number the page had to arrange for.
+  assert.equal(stdout.trim(), '0')
+  await stat(join(dir, 'social.zu1'))
 })
 
 test('every whole program in the README runs', { skip: !NODE }, async (t) => {
