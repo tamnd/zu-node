@@ -15,6 +15,8 @@ import {
   type ZuEdges,
   type ZuFrame,
   type ZuFrameColumn,
+  type ZuColumn,
+  type ZuColumnar,
   type ZuLoadStats,
   type ZuPlainDate,
   type ZuRows,
@@ -223,4 +225,25 @@ export function width(value: ZuValue): number {
   if (typeof value === 'bigint') return value.toString().length
   if (Array.isArray(value)) return value.length
   return 0
+}
+
+export async function totals(path: string): Promise<bigint> {
+  await using conn = await connect(path, { readOnly: true })
+
+  // The buffers themselves, so summing them is a loop over a typed
+  // array and not over a million objects. Which field carries the
+  // values follows from the type, and narrowing on `type` is what makes
+  // `values` a `BigInt64Array` here rather than the union it starts as.
+  const read: ZuColumnar = await conn.columnar('MATCH (p:person) RETURN p.id AS id')
+  const column: ZuColumn = read.columns[0]!
+  if (column.type !== 'int') throw new Error('the projection changed shape')
+
+  let total = 0n
+  for (const value of column.values as BigInt64Array) total += value
+
+  // The counts beside them are numbers, which is the one place a count
+  // in this package is not a bigint, and the status is the statement's.
+  const rows: number = read.rows
+  if (read.gqlstatus !== '00000') throw new Error(read.gqlstatus)
+  return total + BigInt(rows) + BigInt(column.nulls)
 }

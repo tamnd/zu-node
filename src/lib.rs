@@ -19,6 +19,7 @@
 mod append;
 mod buffer;
 mod cancel;
+mod columns;
 mod conn;
 mod error;
 mod frame;

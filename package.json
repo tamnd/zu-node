@@ -72,6 +72,7 @@
     "reference": "node tools/reference.mjs reference",
     "bench": "node bench/query.mjs",
     "bench:append": "node bench/append.mjs",
+    "bench:columnar": "node bench/columnar.mjs",
     "bench:load": "node bench/load.mjs",
     "bench:register": "node bench/register.mjs",
     "bench:temporal": "node --harmony-temporal bench/query.mjs"
