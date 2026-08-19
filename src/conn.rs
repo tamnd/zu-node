@@ -33,6 +33,7 @@ use zudb::query::{QueryResult, Value};
 use zudb::{Config, Database, DiagnosticRecord, Interrupt, ZuError};
 
 use crate::append::OpenTask;
+use crate::arrow::ArrowTask;
 use crate::cancel::Watch;
 use crate::columns::ColumnsTask;
 use crate::error::{aborted, raise, usage};
@@ -742,6 +743,44 @@ impl Connection {
         AsyncTask::new(ColumnsTask(self.task(env, statement, params, options)))
     }
 
+    /// Runs one statement and gives back the bytes of an Arrow IPC
+    /// stream.
+    ///
+    /// ```js
+    /// import { tableFromIPC } from 'apache-arrow'
+    /// const read = await conn.arrow('MATCH (a:account) RETURN a.name AS name, a.balance AS balance')
+    /// const table = tableFromIPC(read.ipc)
+    /// ```
+    ///
+    /// The same buffers [`Connection::columnar`] hands over, with the
+    /// schema written beside them in the format every Arrow
+    /// implementation already reads. That is the difference worth
+    /// knowing: `columnar` is the fastest way out and leaves the caller
+    /// to say what each buffer means, and this is the one where the
+    /// result arrives as a table, a dataframe or a DuckDB relation with
+    /// no code in between.
+    ///
+    /// The translation lives in the engine and is the same one the
+    /// Python client exports through, so a node column names its table
+    /// in both and a year-month duration is a month interval in both.
+    #[napi(
+        ts_args_type = "statement: string, params?: Record<string, ZuParam> | null, options?: ZuArrowOptions | null",
+        ts_return_type = "Promise<ZuArrow>"
+    )]
+    pub fn arrow(
+        &self,
+        env: &Env,
+        statement: Unknown<'_>,
+        params: Option<Unknown<'_>>,
+        options: Option<Object<'_>>,
+    ) -> AsyncTask<ArrowTask> {
+        let batch = batch(options.as_ref());
+        AsyncTask::new(ArrowTask {
+            task: self.task(env, statement, params, options),
+            batch,
+        })
+    }
+
     /// Compiles a statement, pins it, and hands back something that
     /// runs it.
     ///
@@ -1291,6 +1330,20 @@ fn batch_rows(options: Option<&Object<'_>>) -> std::result::Result<Option<u32>, 
             "batchRows is {rows}, and a batch holds a whole number of rows, one at the least"
         )),
     }
+}
+
+/// The same option, read for a record batch rather than for a stream.
+///
+/// Absent is Arrow's own batch, which is what a reader expects and what
+/// keeps a working set inside a cache. The arrays are already in memory
+/// either way, so a batch here is a slice of them and not a copy, and
+/// the size is about what the reader on the other side wants to hold at
+/// once.
+pub(crate) fn batch(options: Option<&Object<'_>>) -> std::result::Result<usize, String> {
+    Ok(match batch_rows(options)? {
+        Some(rows) => rows as usize,
+        None => zu_arrow::BATCH,
+    })
 }
 
 /// Reads an option that has to be a boolean, and says what arrived

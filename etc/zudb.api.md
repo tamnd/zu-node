@@ -27,6 +27,7 @@ export function connect(path?: string | ConnectOptions | undefined | null, optio
 // @public
 export class Connection {
     appender(table: string): Promise<Appender>
+    arrow(statement: string, params?: Record<string, ZuParam> | null, options?: ZuArrowOptions | null): Promise<ZuArrow>
     close(): void
     columnar(statement: string, params?: Record<string, ZuParam> | null, options?: ZuStatementOptions | null): Promise<ZuColumnar>
     cursor(statement: string, params?: Record<string, ZuParam> | null, options?: ZuStreamOptions | null): ZuCursor
@@ -66,6 +67,7 @@ export function load(path: string, options: ZuLoadOptions): Promise<ZuLoadStats>
 
 // @public
 export class Prepared {
+    arrow(params?: Record<string, ZuParam> | null, options?: ZuArrowOptions | null): Promise<ZuArrow>
     close(): Promise<void>
     get closed(): boolean
     columnar(params?: Record<string, ZuParam> | null, options?: ZuStatementOptions | null): Promise<ZuColumnar>
@@ -100,6 +102,21 @@ export type ZuAppendValue =
 | ZuTimestamp
 | ZuDuration
 | ZuTemporalValue
+
+// @public
+export interface ZuArrow {
+    // (undocumented)
+    readonly gqlstatus: string
+    readonly ipc: Uint8Array
+    // (undocumented)
+    readonly notices: ZuNotice[]
+    readonly rows: number
+}
+
+// @public
+export interface ZuArrowOptions extends ZuStatementOptions {
+    readonly batchRows?: number
+}
 
 // @public
 export interface ZuArrowTable {

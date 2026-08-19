@@ -378,6 +378,46 @@ export interface ZuColumnar {
 }
 
 /**
+ * A whole result as Arrow, in the bytes Arrow ships between processes.
+ *
+ * The same buffers a columnar read hands over, with the schema written
+ * beside them, so `tableFromIPC(read.ipc)` is the whole of the reading
+ * code and every Arrow implementation is a reader. A result with no rows
+ * is a schema and one empty batch rather than nothing at all, so the
+ * columns are known either way.
+ */
+export interface ZuArrow {
+  /**
+   * The stream, as one buffer: a schema message and then a message a
+   * batch. It is the addon's own allocation handed over rather than
+   * copied, and it detaches when posted to a worker, which is what makes
+   * a result cross a thread without being cloned.
+   */
+  readonly ipc: Uint8Array
+  /** How many rows are in it, which the batches also add up to. */
+  readonly rows: number
+  readonly gqlstatus: string
+  readonly notices: ZuNotice[]
+}
+
+/**
+ * What a statement read as Arrow takes beside its parameters.
+ */
+export interface ZuArrowOptions extends ZuStatementOptions {
+  /**
+   * How many rows one record batch holds. Arrow's own 65,536 by
+   * default, which is what a reader expects and what keeps a batch
+   * inside a cache.
+   *
+   * The arrays are built whole either way and a batch is a slice of
+   * them, so this costs nothing to change and buys nothing to tune. It
+   * is worth naming when the reader on the other side has a size of its
+   * own, or when the batches are going somewhere one at a time.
+   */
+  readonly batchRows?: number
+}
+
+/**
  * The rows a statement gave back.
  *
  * An array, so iterating it is `for (const row of rows)` and nothing
@@ -999,6 +1039,29 @@ export declare class Connection {
    */
   columnar(statement: string, params?: Record<string, ZuParam> | null, options?: ZuStatementOptions | null): Promise<ZuColumnar>
   /**
+   * Runs one statement and gives back the bytes of an Arrow IPC
+   * stream.
+   *
+   * ```js
+   * import { tableFromIPC } from 'apache-arrow'
+   * const read = await conn.arrow('MATCH (a:account) RETURN a.name AS name, a.balance AS balance')
+   * const table = tableFromIPC(read.ipc)
+   * ```
+   *
+   * The same buffers [`Connection::columnar`] hands over, with the
+   * schema written beside them in the format every Arrow
+   * implementation already reads. That is the difference worth
+   * knowing: `columnar` is the fastest way out and leaves the caller
+   * to say what each buffer means, and this is the one where the
+   * result arrives as a table, a dataframe or a DuckDB relation with
+   * no code in between.
+   *
+   * The translation lives in the engine and is the same one the
+   * Python client exports through, so a node column names its table
+   * in both and a year-month duration is a month interval in both.
+   */
+  arrow(statement: string, params?: Record<string, ZuParam> | null, options?: ZuArrowOptions | null): Promise<ZuArrow>
+  /**
    * Compiles a statement, pins it, and hands back something that
    * runs it.
    *
@@ -1166,6 +1229,8 @@ export declare class Prepared {
   exec(params?: Record<string, ZuParam> | null, options?: ZuStatementOptions | null): Promise<void>
   /** Runs it and gives back its columns rather than its rows. */
   columnar(params?: Record<string, ZuParam> | null, options?: ZuStatementOptions | null): Promise<ZuColumnar>
+  /** Runs it and gives back the bytes of an Arrow IPC stream. */
+  arrow(params?: Record<string, ZuParam> | null, options?: ZuArrowOptions | null): Promise<ZuArrow>
   /**
    * Gives the id back to the session.
    *
