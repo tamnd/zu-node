@@ -6,6 +6,8 @@ import {
   connect,
   isZuError,
   ZuDate,
+  type Appender,
+  type ZuAppendValue,
   type ZuBatch,
   type ZuBigIntMode,
   type ZuError,
@@ -106,6 +108,28 @@ export async function moved(path: string, from: bigint, to: bigint): Promise<boo
 
   // Both are readable after the fact, and both are plain booleans.
   return open && tx.done && !tx.readOnly
+}
+
+export async function loaded(path: string, people: [bigint, string][]): Promise<number> {
+  await using conn = await connect(path)
+
+  // `await using` on an appender needs the same declaration the other
+  // two need, and this one flushes rather than undoing what it holds.
+  await using rows: Appender = await conn.appender('person')
+  for (const person of people) {
+    // A row is an array of values and nothing wider: a null in one does
+    // not compile, because a column of an appender has one type and
+    // every value in it is that type.
+    const row: readonly ZuAppendValue[] = person
+    rows.appendRow(row)
+  }
+
+  // Synchronous, so it is a number rather than a promise, and the two
+  // counts beside it are numbers too.
+  const buffered: number = rows.buffered
+  if (buffered !== people.length) throw new Error('a row went missing')
+  const written: number = await rows.flush()
+  return written + rows.committed
 }
 
 export function retryable(caught: unknown): boolean {

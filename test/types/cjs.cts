@@ -6,6 +6,7 @@ import {
   connect,
   isZuError,
   ZuTimestamp,
+  type ZuAppendValue,
   type ZuParam,
   type ZuStream,
   type ZuTransactionOptions,
@@ -66,6 +67,22 @@ export async function span(path: string, options: ZuTransactionOptions): Promise
     return rows[0]?.n ?? 0
   } finally {
     if (!tx.done) await tx.rollback()
+    conn.close()
+  }
+}
+
+export async function bulk(path: string, batch: readonly ZuAppendValue[][]): Promise<number> {
+  // The `try` and `finally` spelling again, and the word in the
+  // `finally` is `close` rather than `discard`, since a load that got
+  // this far means to keep what it read.
+  const conn = await connect(path)
+  const rows = await conn.appender('person')
+  try {
+    const taken: number = rows.appendRows(batch)
+    if (taken !== batch.length) throw new Error('a row went missing')
+    return await rows.flush()
+  } finally {
+    if (!rows.closed) await rows.close()
     conn.close()
   }
 }

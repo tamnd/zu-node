@@ -8,10 +8,25 @@
 export function abiVersion(): string
 
 // @public
+export class Appender {
+    appendRow(row: readonly ZuAppendValue[]): void
+    appendRows(rows: readonly (readonly ZuAppendValue[])[]): number
+    get buffered(): number
+    close(): Promise<number>
+    get closed(): boolean
+    get committed(): number
+    discard(): number
+    dispose(): Promise<number>
+    flush(): Promise<number>
+    get table(): string
+}
+
+// @public
 export function connect(path: string, options?: ConnectOptions | undefined | null): Promise<Connection>
 
 // @public
 export class Connection {
+    appender(table: string): Promise<Appender>
     close(): void
     cursor(statement: string, params?: Record<string, ZuParam> | null, options?: ZuStreamOptions | null): ZuCursor
     dispose(): Promise<void>
@@ -47,6 +62,19 @@ export class Transaction {
 
 // @public
 export function version(): string
+
+// @public
+export type ZuAppendValue =
+| boolean
+| number
+| bigint
+| string
+| Uint8Array
+| ZuDate
+| ZuTime
+| ZuTimestamp
+| ZuDuration
+| ZuTemporalValue
 
 // @public
 export interface ZuBatch<Row = Record<string, ZuValue>> extends Array<Row> {

@@ -36,7 +36,7 @@ The rows are an array, so iterating them is `for (const row of rows)` and nothin
 
 ## What works today
 
-`connect`, `query`, `exec`, `stream`, `close`, `dispose` and `await using`. Named parameters both ways, including lists, records and nesting. Every scalar the engine has, plus nodes, edges and paths with their tables named rather than numbered, and `ZuDate`, `ZuTime`, `ZuTimestamp` and `ZuDuration`, with `{ temporal: true }` and `toTemporal()` for the runtimes that have `Temporal`. Read-only connections, memory and thread limits. `bigIntMode`, per statement or per connection. An `AbortSignal` on any statement. The full error surface above, and `isZuError` to recognize it. Streaming, as an async iterable, as batches and as a Web Stream. Transactions, with `inTransaction` on the connection. Both module formats, typed separately.
+`connect`, `query`, `exec`, `stream`, `close`, `dispose` and `await using`. Named parameters both ways, including lists, records and nesting. Every scalar the engine has, plus nodes, edges and paths with their tables named rather than numbered, and `ZuDate`, `ZuTime`, `ZuTimestamp` and `ZuDuration`, with `{ temporal: true }` and `toTemporal()` for the runtimes that have `Temporal`. Read-only connections, memory and thread limits. `bigIntMode`, per statement or per connection. An `AbortSignal` on any statement. The full error surface above, and `isZuError` to recognize it. Streaming, as an async iterable, as batches and as a Web Stream. Transactions, with `inTransaction` on the connection. An appender, for loading rows a batch at a time. Both module formats, typed separately.
 
 Build it with `npm run build`, and run the suite with `npm test`. Nothing is published yet, so `npm i zudb` is not a thing you can type at anybody's terminal, but everything it will do is built and installed on every run of the release workflow.
 
@@ -101,6 +101,28 @@ The statements are still the connection's, because the span is the connection's 
 ```
 
 A block that ends well and forgets to commit loses its work, which is a loud kind of wrong and shows up the first time the code runs. The alternative was a block that failed and kept half of what it did, which is a quiet kind and shows up in production. Committing or rolling back twice is refused as a `ZuUsageError` rather than ignored, since the statements after the first end belong to no transaction of yours. Leaving the block of a transaction whose connection has already been closed says nothing, because a closed connection took the unwritten span with it and there is nothing left to undo.
+
+## Loading a lot of rows
+
+`INSERT` is the wrong shape for loading. Every row is parsed, bound, planned and committed, and the commit is the expensive part, so a million rows is a million commits and the load is spent on durability nobody asked for. An appender is the right shape: rows go into columns in memory, and a flush turns the whole buffer into one commit.
+
+```ts
+await using rows = await conn.appender("Person");
+for (const [id, name] of people) rows.appendRow([id, name]);
+await rows.flush();
+```
+
+A row is every column of the table, in the order the table declares them, and a column is a position rather than a name. Naming the columns per row would cost a lookup per value on the one path where per-value cost is the whole story, and a loader knows its own column order. `appendRows` takes an array of them, which is one check for the batch rather than one per row.
+
+`appendRow` is the one synchronous call in this client, and it is synchronous because it reaches nothing. It converts the values in front of it and pushes them onto a vector, bounded by the width of one row, with no file and no lock at the end of it. Making it a promise would put a microtask between the loop and a memcpy and allocate a million promises to describe work that had already finished. Being synchronous it throws rather than rejecting, with the same `ZuUsageError` everything else here rejects with, so `isZuError(caught)` recognizes it either way. Everything that touches the file, which is `flush`, `close` and the disposal, is a promise like the rest of the client.
+
+What is buffered is typed from the table's own columns, read when the appender opened, so a value that does not belong in a column is refused by the call that appended it rather than a million rows later by the flush that would have carried it. The message names the column and the position: `value 0 of this row is a string and column 'id' of 'Person' holds whole numbers`. A refused row is a row that never happened, so the columns that did take a value give it back and the appender is usable as soon as the caller has fixed the row. In a batch the refusal says which row it was and keeps the ones before it, since nothing here is a transaction until the flush.
+
+`await using rows` flushes. That is the opposite of what a transaction's disposal does, and the two differ because the question differs: a transaction that leaves its scope unfinished is a unit of work nobody completed, and a buffer that leaves its scope unwritten is a loader that read a million rows and threw them away. `discard()` is there for the caller who meant exactly that, and it answers how many rows it dropped.
+
+Two more things are worth knowing before a load. A flush issued while one is still running is refused rather than queued, and so is an append, because waiting for either would be the event loop waiting for a write to disk: `await` the flush. And rows an appender writes are not part of an open transaction, since it writes through the file rather than through the session, so a `ROLLBACK` after a flush does not take them back. A load and a transaction are two different things to reach for.
+
+A rel table has no property columns. A row of one is the two ends of an edge, as offsets into the tables it runs between, so `conn.appender("knows")` takes two columns and the flush checks that both rows are there before it writes anything. That check is here rather than the engine's, because the engine's comes after the write is durable.
 
 ## Asking for numbers instead of bigints
 

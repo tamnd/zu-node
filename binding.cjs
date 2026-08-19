@@ -700,6 +700,7 @@ if (!nativeBinding) {
 }
 
 module.exports = nativeBinding
+module.exports.Appender = nativeBinding.Appender
 module.exports.Connection = nativeBinding.Connection
 module.exports.Transaction = nativeBinding.Transaction
 module.exports.ZuCursor = nativeBinding.ZuCursor
