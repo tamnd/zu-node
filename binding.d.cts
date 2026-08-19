@@ -222,6 +222,48 @@ export interface ZuArrowTable {
 export type ZuFrame = ZuArrowTable | Record<string, ZuFrameColumn>
 
 /**
+ * An edge list, as the pairs of row numbers it is.
+ *
+ * Rows are numbered from zero in the order their columns were written,
+ * because at load time a row has no other name. The flat spelling is
+ * there for a program that built its edges in memory and would rather
+ * not make a million two element arrays to hand them over: two elements
+ * an edge, read in one pass.
+ */
+export type ZuEdges = readonly (readonly [number, number])[] | Int32Array | Uint32Array
+
+/**
+ * What a load writes, and how much of it.
+ */
+export interface ZuLoadOptions {
+  /** The node table, which gets a row per element of every column. */
+  readonly nodes: string
+  /** The rel table holding the edges between those rows. `rel` by default. */
+  readonly rels?: string
+  /** The node table's properties, as column name to values. */
+  readonly columns?: Readonly<Record<string, ZuFrameColumn>>
+  /** The edges, as pairs of row numbers. */
+  readonly edges?: ZuEdges | null
+  /**
+   * How many rows the node table has.
+   *
+   * Read off the columns when there are any, so this is for the load
+   * that writes a graph with no properties at all, and a check on the
+   * columns when both are given.
+   */
+  readonly rows?: number
+}
+
+/**
+ * What went into a load.
+ */
+export interface ZuLoadStats {
+  readonly nodes: number
+  readonly rels: number
+  readonly columns: number
+}
+
+/**
  * A walk through the graph: nodes and edges, alternating, a node at
  * each end.
  *
@@ -1023,6 +1065,9 @@ export interface ConnectOptions {
    */
   temporal?: boolean
 }
+
+/** Writes a new database at `path` and answers what went into it. */
+export declare function load(path: string, options: ZuLoadOptions): Promise<ZuLoadStats>
 
 /** The version of the client. */
 export declare function version(): string

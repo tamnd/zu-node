@@ -5,9 +5,11 @@
 import {
   connect,
   isZuError,
+  load,
   ZuTimestamp,
   type ZuAppendValue,
   type ZuArrowTable,
+  type ZuLoadOptions,
   type ZuParam,
   type ZuStream,
   type ZuTransactionOptions,
@@ -86,6 +88,14 @@ export async function bulk(path: string, batch: readonly ZuAppendValue[][]): Pro
     if (!rows.closed) await rows.close()
     conn.close()
   }
+}
+
+export async function graph(path: string, options: ZuLoadOptions): Promise<number> {
+  // The options are an object of their own, so a caller can build one
+  // and pass it around, which is what a loader reading a manifest ends
+  // up doing.
+  const stats = await load(path, options)
+  return stats.nodes
 }
 
 export async function scanned(path: string, table: ZuArrowTable): Promise<string[]> {

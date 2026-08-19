@@ -18,6 +18,7 @@ const cjs = require('../zudb.cjs')
 // exactly what a test derived from one of them cannot see.
 const SURFACE = [
   'connect',
+  'load',
   'version',
   'abiVersion',
   'isZuError',

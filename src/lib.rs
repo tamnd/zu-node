@@ -22,6 +22,7 @@ mod cancel;
 mod conn;
 mod error;
 mod frame;
+mod load;
 mod register;
 mod stream;
 mod temporal;

@@ -17,6 +17,7 @@ const require = createRequire(import.meta.url)
 const zudb = require('./zudb.cjs')
 
 export const connect = zudb.connect
+export const load = zudb.load
 export const version = zudb.version
 export const abiVersion = zudb.abiVersion
 export const isZuError = zudb.isZuError

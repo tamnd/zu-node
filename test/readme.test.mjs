@@ -81,7 +81,7 @@ async function installed(t, program) {
 }
 
 test('the README prints programs and fragments and knows which is which', async () => {
-  assert.equal((await programs()).length, 1, "the README's whole programs")
+  assert.equal((await programs()).length, 2, "the README's whole programs")
   assert.ok((await blocks('ts')).length > (await programs()).length, 'and its fragments')
 })
 

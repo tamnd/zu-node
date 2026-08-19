@@ -36,7 +36,7 @@ The rows are an array, so iterating them is `for (const row of rows)` and nothin
 
 ## What works today
 
-`connect`, `query`, `exec`, `stream`, `close`, `dispose` and `await using`. Named parameters both ways, including lists, records and nesting. Every scalar the engine has, plus nodes, edges and paths with their tables named rather than numbered, and `ZuDate`, `ZuTime`, `ZuTimestamp` and `ZuDuration`, with `{ temporal: true }` and `toTemporal()` for the runtimes that have `Temporal`. Read-only connections, memory and thread limits. `bigIntMode`, per statement or per connection. An `AbortSignal` on any statement. The full error surface above, and `isZuError` to recognize it. Streaming, as an async iterable, as batches and as a Web Stream. Transactions, with `inTransaction` on the connection. An appender, for loading rows a batch at a time. Registered frames, so an Arrow table or an object of typed arrays is something a statement can match on without the rows being copied. Both module formats, typed separately.
+`connect`, `query`, `exec`, `stream`, `close`, `dispose` and `await using`. Named parameters both ways, including lists, records and nesting. Every scalar the engine has, plus nodes, edges and paths with their tables named rather than numbered, and `ZuDate`, `ZuTime`, `ZuTimestamp` and `ZuDuration`, with `{ temporal: true }` and `toTemporal()` for the runtimes that have `Temporal`. Read-only connections, memory and thread limits. `bigIntMode`, per statement or per connection. An `AbortSignal` on any statement. The full error surface above, and `isZuError` to recognize it. Streaming, as an async iterable, as batches and as a Web Stream. Transactions, with `inTransaction` on the connection. An appender, for loading rows a batch at a time, and `load` for building a whole database out of columns and an edge list. Registered frames, so an Arrow table or an object of typed arrays is something a statement can match on without the rows being copied. Both module formats, typed separately.
 
 Build it with `npm run build`, and run the suite with `npm test`. Nothing is published yet, so `npm i zudb` is not a thing you can type at anybody's terminal, but everything it will do is built and installed on every run of the release workflow.
 
@@ -123,6 +123,46 @@ What is buffered is typed from the table's own columns, read when the appender o
 Two more things are worth knowing before a load. A flush issued while one is still running is refused rather than queued, and so is an append, because waiting for either would be the event loop waiting for a write to disk: `await` the flush. And rows an appender writes are not part of an open transaction, since it writes through the file rather than through the session, so a `ROLLBACK` after a flush does not take them back. A load and a transaction are two different things to reach for.
 
 A rel table has no property columns. A row of one is the two ends of an edge, as offsets into the tables it runs between, so `conn.appender("knows")` takes two columns and the flush checks that both rows are there before it writes anything. That check is here rather than the engine's, because the engine's comes after the write is durable.
+
+## Building a graph out of columns and an edge list
+
+An appender writes rows into a table that already exists, and no statement makes a rel table, so neither of them is a way to a graph with edges in it. `load` is the other shape and the one the C ABI's loader has: a table's columns whole, an edge list whole, one file written once.
+
+```ts
+import { load } from "zudb";
+
+const uid = new BigInt64Array([1n, 2n, 3n]);
+const name = ["ada", "grace", "kay"];
+
+const stats = await load("social.zu1", {
+  nodes: "person",
+  rels: "knows",
+  columns: { uid, name },
+  edges: [
+    [0, 1],
+    [1, 2],
+  ],
+});
+console.log(stats); // { nodes: 3, rels: 2, columns: 2 }
+```
+
+It is a function rather than a method because there is no connection yet: the file it writes is the file a program connects to afterwards. The path must not exist, since a load builds a database rather than adding to one, and a path that already holds one is a caller who meant a different path. What comes back is what went in, as `{ nodes, rels, columns }`.
+
+Edges name rows by position, counting from zero in the order the columns were written, because at load time a row has no other name. They go in as pairs, `[[0, 1], [1, 2]]`, or as a flat `Int32Array` or `Uint32Array` of two elements an edge for a program that built them in memory and would rather not make a million small arrays to hand them over. The same edge twice is one edge, and an edge naming a row the table has not got is refused rather than written, because a builder handed one would either invent the row or lose the edge.
+
+A column goes in as an array of values or as a typed array. The first value of an array settles what the column holds and every value after it has to agree, which is the appender's rule, with the same one widening: `[1, 2, 2.5]` is a column of floats. A typed array is read as the numbers it already holds, which is one pass over memory rather than a runtime call per value, and every integer width lands as the INT64 the store keeps. On this machine, with `npm run bench:load` over a million rows:
+
+```
+one column, typed array             51.3 ms      51 ns/row
+one column, plain array             92.2 ms      92 ns/row
+two columns, with names           1060.1 ms    1060 ns/row
+two columns and an edge each      1096.9 ms    1097 ns/row
+the appender, for contrast        2124.5 ms    2125 ns/row
+```
+
+The last line is the same two columns through the appender, which is the closest comparison there is: a load is about twice as quick and is the only one of the two that can write the edges. The strings are where the rest of the time goes, which is the store encoding them rather than anything on this side of the boundary.
+
+Everything the caller passed is read on the thread that owns the runtime, because that is the only thread allowed to read a JavaScript value, and everything after that runs on the threadpool: the edges are sorted, the graph is built, and every column is encoded and written to disk. So the event loop is free for the whole of the expensive part, which on a load is all of it.
 
 ## Matching on columns a program already has
 
@@ -238,7 +278,7 @@ typedoc rather than api-documenter, which would have been the obvious pick since
 
 Anything outside that table has no binary and no source build to fall back on, so the install resolves nothing and the first `require` says so. The browser and the platforms nobody builds for are what the WASM target answers, later.
 
-`npm run bench` measures what this package adds to the engine, which is a row object and one JavaScript value per column: the same scan with the rows dropped is the floor, and the difference between the two is what the boundary costs. Run it against a release build, since a debug build of the engine moves the floor by an order of magnitude and not the rest of it. `npm run bench:append` does the same for the load path and `npm run bench:register` for registered frames, where what is being watched is that the registration does not scale with the rows.
+`npm run bench` measures what this package adds to the engine, which is a row object and one JavaScript value per column: the same scan with the rows dropped is the floor, and the difference between the two is what the boundary costs. Run it against a release build, since a debug build of the engine moves the floor by an order of magnitude and not the rest of it. `npm run bench:append` does the same for the appender, `npm run bench:load` for building a database out of columns, and `npm run bench:register` for registered frames, where what is being watched is that the registration does not scale with the rows.
 
 ## Still to come
 
