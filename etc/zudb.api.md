@@ -28,6 +28,7 @@ export function connect(path: string, options?: ConnectOptions | undefined | nul
 export class Connection {
     appender(table: string): Promise<Appender>
     close(): void
+    columnar(statement: string, params?: Record<string, ZuParam> | null, options?: ZuStatementOptions | null): Promise<ZuColumnar>
     cursor(statement: string, params?: Record<string, ZuParam> | null, options?: ZuStreamOptions | null): ZuCursor
     dispose(): Promise<void>
     exec(statement: string, params?: Record<string, ZuParam> | null, options?: ZuStatementOptions | null): Promise<void>
@@ -98,6 +99,49 @@ export interface ZuBatch<Row = Record<string, ZuValue>> extends Array<Row> {
 
 // @public
 export type ZuBigIntMode = 'bigint' | 'number'
+
+// @public
+export interface ZuColumn {
+    readonly data: Uint8Array | null
+    readonly items: ZuValue[] | null
+    // (undocumented)
+    readonly length: number
+    // (undocumented)
+    readonly name: string
+    readonly nulls: number
+    readonly offsets: Int32Array | BigInt64Array | null
+    // (undocumented)
+    readonly type: ZuColumnType
+    readonly unit: 'days' | 'nanos' | 'months' | null
+    readonly validity: Uint8Array | null
+    readonly values: BigInt64Array | Float64Array | Int32Array | Uint8Array | null
+    readonly zone: number | null
+}
+
+// @public
+export interface ZuColumnar {
+    // (undocumented)
+    readonly columns: ZuColumn[]
+    // (undocumented)
+    readonly gqlstatus: string
+    // (undocumented)
+    readonly notices: ZuNotice[]
+    // (undocumented)
+    readonly rows: number
+}
+
+// @public
+export type ZuColumnType =
+| 'null'
+| 'bool'
+| 'int'
+| 'float'
+| 'string'
+| 'date'
+| 'time'
+| 'datetime'
+| 'duration'
+| 'value'
 
 // @public
 export class ZuCursor {

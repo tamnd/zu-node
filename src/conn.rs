@@ -34,6 +34,7 @@ use zudb::{Config, Database, DiagnosticRecord, Interrupt, ZuError};
 
 use crate::append::OpenTask;
 use crate::cancel::Watch;
+use crate::columns::ColumnsTask;
 use crate::error::{aborted, raise, usage};
 use crate::register::{self, RegisterTask, RegisteredTask, UnregisterTask};
 use crate::stream::{self, Started, ZuCursor};
@@ -549,6 +550,29 @@ impl Connection {
         AsyncTask::new(ExecTask(self.task(env, statement, params, options)))
     }
 
+    /// Runs one statement and gives back its columns rather than its
+    /// rows.
+    ///
+    /// The same statement as [`Connection::query`], read down instead
+    /// of across: what comes back is one buffer a column, in the layout
+    /// Arrow already uses, and no object a row. That is the way out for
+    /// anything that is going to be counted, plotted or handed to a
+    /// dataframe, and it is the way out that does not build a million
+    /// JavaScript values on the way.
+    #[napi(
+        ts_args_type = "statement: string, params?: Record<string, ZuParam> | null, options?: ZuStatementOptions | null",
+        ts_return_type = "Promise<ZuColumnar>"
+    )]
+    pub fn columnar(
+        &self,
+        env: &Env,
+        statement: Unknown<'_>,
+        params: Option<Unknown<'_>>,
+        options: Option<Object<'_>>,
+    ) -> AsyncTask<ColumnsTask> {
+        AsyncTask::new(ColumnsTask(self.task(env, statement, params, options)))
+    }
+
     /// Runs one statement and gives back a cursor over its rows.
     ///
     /// The pull underneath `stream`, which is what a program uses. The
@@ -1052,7 +1076,7 @@ impl QueryTask {
     /// The names are read while the lock is held, because a catalog
     /// borrowed from the connection cannot outlive it and a result that
     /// names its tables has to carry them.
-    fn run(&mut self) -> std::result::Result<(QueryResult, Shape), Failure> {
+    pub(crate) fn run(&mut self) -> std::result::Result<(QueryResult, Shape), Failure> {
         if let Some(message) = self.refused.take() {
             return Err(Failure::Usage(message));
         }
@@ -1093,12 +1117,12 @@ impl QueryTask {
     }
 
     /// The exception this rejects the caller's promise with.
-    fn failed(&self, env: &Env, failure: Failure) -> Error {
+    pub(crate) fn failed(&self, env: &Env, failure: Failure) -> Error {
         failed(env, failure, self.watch.as_ref())
     }
 
     /// Takes the listener back off the signal, whatever happened.
-    fn release(&mut self, env: &Env) -> Result<()> {
+    pub(crate) fn release(&mut self, env: &Env) -> Result<()> {
         match self.watch.take() {
             Some(watch) => watch.release(env),
             None => Ok(()),

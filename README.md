@@ -36,7 +36,7 @@ The rows are an array, so iterating them is `for (const row of rows)` and nothin
 
 ## What works today
 
-`connect`, `query`, `exec`, `stream`, `close`, `dispose` and `await using`. Named parameters both ways, including lists, records and nesting. Every scalar the engine has, plus nodes, edges and paths with their tables named rather than numbered, and `ZuDate`, `ZuTime`, `ZuTimestamp` and `ZuDuration`, with `{ temporal: true }` and `toTemporal()` for the runtimes that have `Temporal`. Read-only connections, memory and thread limits. `bigIntMode`, per statement or per connection. An `AbortSignal` on any statement. The full error surface above, and `isZuError` to recognize it. Streaming, as an async iterable, as batches and as a Web Stream. Transactions, with `inTransaction` on the connection. An appender, for loading rows a batch at a time, and `load` for building a whole database out of columns and an edge list. Registered frames, so an Arrow table or an object of typed arrays is something a statement can match on without the rows being copied. Both module formats, typed separately.
+`connect`, `query`, `exec`, `stream`, `close`, `dispose` and `await using`. Named parameters both ways, including lists, records and nesting. Every scalar the engine has, plus nodes, edges and paths with their tables named rather than numbered, and `ZuDate`, `ZuTime`, `ZuTimestamp` and `ZuDuration`, with `{ temporal: true }` and `toTemporal()` for the runtimes that have `Temporal`. Read-only connections, memory and thread limits. `bigIntMode`, per statement or per connection. An `AbortSignal` on any statement. The full error surface above, and `isZuError` to recognize it. Streaming, as an async iterable, as batches and as a Web Stream. Transactions, with `inTransaction` on the connection. An appender, for loading rows a batch at a time, and `load` for building a whole database out of columns and an edge list. Registered frames, so an Arrow table or an object of typed arrays is something a statement can match on without the rows being copied. `columnar`, for a result read down its columns as the buffers themselves rather than across its rows as objects. Both module formats, typed separately.
 
 Build it with `npm run build`, and run the suite with `npm test`. Nothing is published yet, so `npm i zudb` is not a thing you can type at anybody's terminal, but everything it will do is built and installed on every run of the release workflow.
 
@@ -186,6 +186,60 @@ The frame belongs to the connection it was registered on and goes when that conn
 
 Registering the same name again replaces what it stands for, columns and all. Registering over a table the database already holds is refused, since a statement naming it would mean the stored one. A frame with no rows is a table to match on and answers nothing, because a frame knows its columns without being told by a row. A null anywhere is refused by column and row, since a property that is null is one no row of this engine holds, and registering inside a transaction is refused because a frame is registered on the session, which is the thing the transaction is running on.
 
+## Reading a result as columns
+
+`query` builds an object a row and a JavaScript value a cell, which is what a program reading a hundred rows wants and the wrong shape for a million. `columnar` runs the same statement and hands back the buffers instead:
+
+```ts
+const read = await conn.columnar(`MATCH (p:person) RETURN p.age AS age`);
+read.rows; // 1000000
+read.columns[0].values; // a BigInt64Array of every age, and not one object
+```
+
+The buffers are the engine's own, moved rather than read: the pointer V8 is given is the pointer the engine filled, and the allocation is freed when the typed array is collected. So a column of a million integers crosses the boundary as a pointer and a length. On this machine, with `npm run bench:columnar` over a million rows:
+
+```
+one integer column, columnar       38.4 ms      38 ns/row
+one integer column, rows          243.1 ms     243 ns/row
+a string column, columnar          50.3 ms      50 ns/row
+a string column, rows             262.0 ms     262 ns/row
+three columns, columnar            75.8 ms      76 ns/row
+three columns, rows               632.2 ms     632 ns/row
+```
+
+Walking what came back costs the same either way, at about 14 ns a row for a sum over the buffer and the same over the rows, which is worth saying because it is where the win is not. V8 reads a property of a small object about as fast as an element of a typed array. What it cannot do is make a million of those objects for nothing, and that is the whole of the six to eight times above.
+
+Every column says what it is, and reading one is a switch on `type` rather than a series of tests for what is there. `values` carries everything of a fixed width: a `BigInt64Array` of integers, nanoseconds or months, a `Float64Array` of floats, an `Int32Array` of days, and for booleans a `Uint8Array` of one bit a row, least significant bit first. A string column has `data`, the bytes of every string end to end, and `offsets`, one more than there are rows, so row `i` is `data.subarray(offsets[i], offsets[i + 1])`. `validity` is one bit a row again, set meaning the row has a value, and it is null when nothing in the column is, so the common case costs a reader nothing to skip. `unit` says whether a cell counts days, nanoseconds or months, and `zone` is the minutes east of UTC a column of zoned times was written with.
+
+That layout is Arrow's, which is the point of it. `apache-arrow` wraps a buffer of this shape without copying it, so a table is eleven lines and no dependency of this package:
+
+```ts
+// with apache-arrow installed, and nothing in zudb importing it
+const table = new Table(
+  Object.fromEntries(
+    read.columns.map((column) => [
+      column.name,
+      new Vector([
+        makeData({
+          type: arrow(column), // Int64, Float64, Bool, Utf8, DateDay, TimestampNanosecond
+          length: column.length,
+          nullCount: column.nulls,
+          nullBitmap: column.validity ?? undefined,
+          data: column.data ?? column.values,
+          valueOffsets: column.offsets ?? undefined,
+        }),
+      ]),
+    ]),
+  ),
+);
+```
+
+The same memory is on both sides of that: `table.getChild("age").data[0].values` is the array the engine filled, not a copy of it. The recipe is printed here rather than shipped because a client that hands out an Arrow object has to agree with one version of Arrow forever, and a client that hands out the bytes agrees with all of them. It is run in the test suite, so it is checked rather than believed.
+
+Two things are not buffers, and both are named by the type rather than found out by looking. A column of nodes, rels, paths, lists or records has no fixed width cell, so it arrives as `items`, holding the same JavaScript values `query` would have made. A column of nothing but nulls has a length and nothing else, because there is nothing to put in a buffer. A column that mixes two types is refused, naming the column and the row that did it, since a columnar result holds one type per column and a column that quietly became strings is worse than one that would not build.
+
+`bigIntMode` says nothing here. A columnar read has one physical layout per type and an INT64 column is 64 bit cells however a caller would rather read one, which is the difference between a buffer and a value. The mode still decides what is inside `items`, where this client is making objects anyway.
+
 ## Asking for numbers instead of bigints
 
 `bigIntMode` says how INT64 is spelled on the way out. It goes on one statement, or on a connection for all of them, and a statement on a connection that named one may still name the other:
@@ -278,7 +332,7 @@ typedoc rather than api-documenter, which would have been the obvious pick since
 
 Anything outside that table has no binary and no source build to fall back on, so the install resolves nothing and the first `require` says so. The browser and the platforms nobody builds for are what the WASM target answers, later.
 
-`npm run bench` measures what this package adds to the engine, which is a row object and one JavaScript value per column: the same scan with the rows dropped is the floor, and the difference between the two is what the boundary costs. Run it against a release build, since a debug build of the engine moves the floor by an order of magnitude and not the rest of it. `npm run bench:append` does the same for the appender, `npm run bench:load` for building a database out of columns, and `npm run bench:register` for registered frames, where what is being watched is that the registration does not scale with the rows.
+`npm run bench` measures what this package adds to the engine, which is a row object and one JavaScript value per column: the same scan with the rows dropped is the floor, and the difference between the two is what the boundary costs. Run it against a release build, since a debug build of the engine moves the floor by an order of magnitude and not the rest of it. `npm run bench:append` does the same for the appender, `npm run bench:load` for building a database out of columns, `npm run bench:register` for registered frames, where what is being watched is that the registration does not scale with the rows, and `npm run bench:columnar` for a result read down its columns against the same result read across its rows.
 
 ## Still to come
 

@@ -291,6 +291,93 @@ export interface ZuNotice {
 }
 
 /**
+ * What a column of a columnar read turned out to hold.
+ *
+ * Narrower than the type the statement declared, because the question
+ * here is which buffer arrived: a time with an offset and a time
+ * without are the same 64 bit cells, and the offset rides beside as
+ * `zone`. `value` is the fallback for what no fixed width cell covers,
+ * which is nodes, rels, paths, lists and records, and `null` is a
+ * column that held nothing else.
+ */
+export type ZuColumnType =
+  | 'null'
+  | 'bool'
+  | 'int'
+  | 'float'
+  | 'string'
+  | 'date'
+  | 'time'
+  | 'datetime'
+  | 'duration'
+  | 'value'
+
+/**
+ * One column of a result, as the buffer holding it.
+ *
+ * Every field is present on every column and holds null where it does
+ * not apply, so reading one is a switch on `type` rather than a series
+ * of tests for what is there. Which field carries the values follows
+ * from the type: `values` for everything of a fixed width, `data` and
+ * `offsets` for strings, `items` for what no buffer covers, and none of
+ * them for a column of nulls.
+ *
+ * The buffers are the engine's own, handed over rather than copied, and
+ * they are laid out the way Arrow lays them out: values end to end, a
+ * boolean as one bit a row, a string column as its bytes and `length +
+ * 1` offsets into them, where row `i` spans `offsets[i]` to `offsets[i
+ * + 1]`.
+ */
+export interface ZuColumn {
+  readonly name: string
+  readonly type: ZuColumnType
+  readonly length: number
+  /**
+   * The cells, for a column of a fixed width: `BigInt64Array` for
+   * integers, nanoseconds and months, `Float64Array` for floats,
+   * `Int32Array` for days, and a `Uint8Array` of packed bits for
+   * booleans, least significant bit first.
+   */
+  readonly values: BigInt64Array | Float64Array | Int32Array | Uint8Array | null
+  /** The bytes of every string end to end, for a string column. */
+  readonly data: Uint8Array | null
+  /**
+   * `length + 1` offsets into `data`, for a string column. Narrow until
+   * the bytes pass what a 32 bit offset addresses, which is the
+   * difference Arrow calls Utf8 against LargeUtf8.
+   */
+  readonly offsets: Int32Array | BigInt64Array | null
+  /** The values themselves, for a column of type `value`. */
+  readonly items: ZuValue[] | null
+  /**
+   * One bit a row, least significant bit first, set meaning the row has
+   * a value. Null when every row has one, which is the common case and
+   * the one where a reader gets to skip the test.
+   */
+  readonly validity: Uint8Array | null
+  /** How many rows are null, which is zero when `validity` is null. */
+  readonly nulls: number
+  /** What one cell counts: `days`, `nanos` or `months`. */
+  readonly unit: 'days' | 'nanos' | 'months' | null
+  /** Minutes east of UTC, for a column of zoned times or datetimes. */
+  readonly zone: number | null
+}
+
+/**
+ * A whole result read down its columns.
+ *
+ * `rows` is every column's length, and is the answer for a statement
+ * that projected nothing at all. `gqlstatus` and `notices` are the
+ * statement's, exactly as they are on the rows.
+ */
+export interface ZuColumnar {
+  readonly rows: number
+  readonly columns: ZuColumn[]
+  readonly gqlstatus: string
+  readonly notices: ZuNotice[]
+}
+
+/**
  * The rows a statement gave back.
  *
  * An array, so iterating it is `for (const row of rows)` and nothing

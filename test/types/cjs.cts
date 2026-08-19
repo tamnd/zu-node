@@ -9,6 +9,7 @@ import {
   ZuTimestamp,
   type ZuAppendValue,
   type ZuArrowTable,
+  type ZuColumnType,
   type ZuLoadOptions,
   type ZuParam,
   type ZuStream,
@@ -121,4 +122,21 @@ export async function ids(path: string): Promise<bigint[]> {
     conn.close()
   }
   return out
+}
+
+export async function shapes(path: string): Promise<ZuColumnType[]> {
+  const conn = await connect(path, { readOnly: true })
+  const read = await conn.columnar('MATCH (p:person) RETURN p.id AS id, p.name AS name')
+
+  // A string column is its bytes and its offsets, and both are nullable
+  // on every column, so reading one without asking what it is does not
+  // compile.
+  const text = new TextDecoder()
+  for (const column of read.columns) {
+    if (column.type !== 'string' || column.data === null || column.offsets === null) continue
+    text.decode(column.data.subarray(Number(column.offsets[0]), Number(column.offsets[1])))
+  }
+
+  await conn.close()
+  return read.columns.map((column) => column.type)
 }
