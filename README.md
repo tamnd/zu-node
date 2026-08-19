@@ -34,9 +34,28 @@ The rows are an array, so iterating them is `for (const row of rows)` and nothin
 - **A refusal is a rejection.** A closed connection, a statement that is not a string and a parameter of a type nothing can bind are all refused inside the promise rather than thrown out of the call, so one `await` catches everything one statement can do and no caller has to wrap the same call twice. That holds for the arguments too: passing a number where a statement goes is a `ZuUsageError` the promise rejects with, not a `TypeError` off the stack.
 - **Parameters are named, and nothing about them is guessed.** An object keyed by the names the statement uses, without the `$`. An array is refused rather than bound by position, because zu has no positional parameters and binding one by index would run the statement with none of the values the caller passed and say nothing about it. A value that contains itself is refused too, at a nesting depth no real value reaches.
 
+## A database with no file
+
+`connect()` with nothing after it is a database in memory, and it makes no file anywhere.
+
+```ts
+import { connect } from "zudb";
+
+await using conn = await connect();
+
+await conn.exec(`INSERT (p:Person {id: 1, name: 'ada'})`);
+for (const { name } of await conn.query(`MATCH (p:Person) RETURN p.name AS name`)) {
+  console.log(name);
+}
+```
+
+`connect(":memory:")` is the same thing spelled the way every embedded database spells it, and it makes no file called `:memory:` either, which is what it used to do. Options may stand where the path would, so `connect({ threads: 2 })` is a call and not a mistake.
+
+It is the whole engine and not a reduced one: writes, transactions, the appender, registered frames and streams, all of it, on bytes that are not a file. `conn.memory` says which kind you have, since `path` cannot quite answer it on a filesystem that allows a colon in a name. Nothing survives the last connection, which is the point: a test, a script, or five minutes with the language costs no cleanup and leaves no `social.zu1` in a directory somebody has to notice later.
+
 ## What works today
 
-`connect`, `query`, `exec`, `stream`, `close`, `dispose` and `await using`. Named parameters both ways, including lists, records and nesting. Every scalar the engine has, plus nodes, edges and paths with their tables named rather than numbered, and `ZuDate`, `ZuTime`, `ZuTimestamp` and `ZuDuration`, with `{ temporal: true }` and `toTemporal()` for the runtimes that have `Temporal`. Read-only connections, memory and thread limits. `bigIntMode`, per statement or per connection. An `AbortSignal` on any statement. The full error surface above, and `isZuError` to recognize it. Streaming, as an async iterable, as batches and as a Web Stream. Transactions, with `inTransaction` on the connection. An appender, for loading rows a batch at a time, and `load` for building a whole database out of columns and an edge list. Registered frames, so an Arrow table or an object of typed arrays is something a statement can match on without the rows being copied. `columnar`, for a result read down its columns as the buffers themselves rather than across its rows as objects. Prepared statements, compiled at the line that asked and run as often as wanted, and `explain` and `profile`, as a tree a program walks and as the listing a person reads. Both module formats, typed separately.
+`connect`, `query`, `exec`, `stream`, `close`, `dispose` and `await using`. Named parameters both ways, including lists, records and nesting. Every scalar the engine has, plus nodes, edges and paths with their tables named rather than numbered, and `ZuDate`, `ZuTime`, `ZuTimestamp` and `ZuDuration`, with `{ temporal: true }` and `toTemporal()` for the runtimes that have `Temporal`. Read-only connections, databases in memory, memory and thread limits. `bigIntMode`, per statement or per connection. An `AbortSignal` on any statement. The full error surface above, and `isZuError` to recognize it. Streaming, as an async iterable, as batches and as a Web Stream. Transactions, with `inTransaction` on the connection. An appender, for loading rows a batch at a time, and `load` for building a whole database out of columns and an edge list. Registered frames, so an Arrow table or an object of typed arrays is something a statement can match on without the rows being copied. `columnar`, for a result read down its columns as the buffers themselves rather than across its rows as objects. Prepared statements, compiled at the line that asked and run as often as wanted, and `explain` and `profile`, as a tree a program walks and as the listing a person reads. Both module formats, typed separately.
 
 Build it with `npm run build`, and run the suite with `npm test`. Nothing is published yet, so `npm i zudb` is not a thing you can type at anybody's terminal, but everything it will do is built and installed on every run of the release workflow.
 

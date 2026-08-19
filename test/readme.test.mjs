@@ -22,7 +22,7 @@
 
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { mkdtemp, readFile, rm, stat, symlink, writeFile, mkdir } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm, stat, symlink, writeFile, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import test from 'node:test'
@@ -81,7 +81,7 @@ async function installed(t, program) {
 }
 
 test('the README prints programs and fragments and knows which is which', async () => {
-  assert.equal((await programs()).length, 2, "the README's whole programs")
+  assert.equal((await programs()).length, 3, "the README's whole programs")
   assert.ok((await blocks('ts')).length > (await programs()).length, 'and its fragments')
 })
 
@@ -100,6 +100,19 @@ test('the first minute of the README runs as printed', { skip: !NODE }, async (t
   // A reader runs it in the directory they are standing in, and the
   // database is there when it finishes.
   await stat(join(dir, 'social.zu1'))
+})
+
+test('the program with no path leaves the directory empty', { skip: !NODE }, async (t) => {
+  // The claim the section makes is the one worth testing: a reader who
+  // runs it finds nothing beside them afterwards.
+  const program = (await programs()).find((block) => block.includes('connect()'))
+  assert.ok(program, 'the block that opens a database in memory')
+
+  const { dir, file } = await installed(t, program)
+  const { stdout } = await run(process.execPath, [file], { cwd: dir })
+
+  assert.equal(stdout.trim(), 'ada')
+  assert.deepEqual(await readdir(dir), ['main.ts', 'node_modules', 'package.json'].sort())
 })
 
 test('every whole program in the README runs', { skip: !NODE }, async (t) => {

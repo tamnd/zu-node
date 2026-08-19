@@ -131,20 +131,38 @@ pub struct Connection {
     spelling: Spelling,
     path: String,
     read_only: bool,
+    /// Whether the database behind it is in memory, which is the one
+    /// thing [`Self::path`] cannot quite say: a file could be called
+    /// `:memory:` on any filesystem that allows a colon.
+    memory: bool,
 }
+
+/// The name a database in memory is asked for by, and answers to.
+///
+/// The spelling every embedded database has used for thirty years,
+/// which is the reason it is this and not something better: a caller
+/// who types it has already been taught what it means somewhere else.
+pub(crate) const MEMORY: &str = ":memory:";
 
 /// Opens the database at `path` and connects to it.
 ///
 /// Creates one when the path holds nothing, which is what a first
 /// program expects and what every embedded database does. A read-only
 /// connection never creates anything.
+///
+/// With no path, with `null`, or with `':memory:'`, the database is in
+/// memory and no file is made anywhere. It is the whole engine and not
+/// a reduced one, so it takes writes and transactions and the appender
+/// exactly as a database on disk does, and it is gone when the last
+/// connection to it is. Options may stand where the path would in that
+/// case, so `connect({ threads: 2 })` is a call and not a mistake.
 #[napi(
-    ts_args_type = "path: string, options?: ConnectOptions | undefined | null",
+    ts_args_type = "path?: string | ConnectOptions | undefined | null, options?: ConnectOptions | undefined | null",
     ts_return_type = "Promise<Connection>"
 )]
 pub fn connect(
     env: &Env,
-    path: Unknown<'_>,
+    path: Option<Unknown<'_>>,
     options: Option<ConnectOptions>,
 ) -> AsyncTask<ConnectTask> {
     // Whether this runtime has `Temporal` is a question only the thread
@@ -152,17 +170,55 @@ pub fn connect(
     // the thread that opens the database, where the answer decides
     // whether there is anything to open.
     let has_temporal = temporal::present(env).unwrap_or(false);
-    let path = text(&path, "path");
+    let (path, options, refused) = arguments(path, options);
     AsyncTask::new(ConnectTask {
-        path: path.as_deref().unwrap_or_default().to_string(),
-        refused: path.err(),
+        memory: path.is_none(),
+        path: path.unwrap_or_else(|| MEMORY.to_string()),
+        refused,
         options,
         has_temporal,
     })
 }
 
+/// Which of the three shapes the call was written in.
+///
+/// A path and options, options alone, or neither. The first argument
+/// is read here rather than declared, because a value that is a string
+/// in one call and an object in the next is a value napi would refuse
+/// before this client got to say anything about it.
+///
+/// The path comes back as `None` when the database is in memory, which
+/// is the one thing the three shapes have to agree on.
+fn arguments(
+    first: Option<Unknown<'_>>,
+    second: Option<ConnectOptions>,
+) -> (Option<String>, Option<ConnectOptions>, Option<String>) {
+    let Some(first) = first else {
+        return (None, second, None);
+    };
+    let kind = match first.get_type() {
+        Ok(kind) => kind,
+        Err(err) => return (None, second, Some(err.reason)),
+    };
+    match kind {
+        ValueType::Undefined | ValueType::Null => (None, second, None),
+        ValueType::Object => match ConnectOptions::from_unknown(first) {
+            Ok(options) => (None, Some(options), None),
+            Err(err) => (None, second, Some(err.reason)),
+        },
+        _ => match text(&first, "path") {
+            Ok(path) if path == MEMORY => (None, second, None),
+            Ok(path) => (Some(path), second, None),
+            Err(message) => (None, second, Some(message)),
+        },
+    }
+}
+
 pub struct ConnectTask {
     path: String,
+    /// Whether the database is in memory, in which case [`Self::path`]
+    /// is the name it is asked for by rather than a name to open.
+    memory: bool,
     /// What this client refused the call with, before any of it ran.
     refused: Option<String>,
     options: Option<ConnectOptions>,
@@ -225,8 +281,16 @@ impl<'task> ScopedTask<'task> for ConnectTask {
                 config = config.threads(threads as usize);
             }
         }
-        Ok(open(PathBuf::from(&self.path), read_only, config)
-            .map(|opened| Opened { spelling, ..opened })
+        let opened = match self.memory {
+            true => memory(config),
+            false => open(PathBuf::from(&self.path), read_only, config),
+        };
+        Ok(opened
+            .map(|opened| Opened {
+                spelling,
+                read_only,
+                ..opened
+            })
             .map_err(Failure::Engine))
     }
 
@@ -240,6 +304,7 @@ impl<'task> ScopedTask<'task> for ConnectTask {
             spelling: opened.spelling,
             path: opened.path,
             read_only: opened.read_only,
+            memory: opened.memory,
         }
         .into_instance(env)?;
         wire_disposal(env, &mut instance, "dispose")?;
@@ -279,6 +344,25 @@ pub struct Opened {
     spelling: Spelling,
     path: String,
     read_only: bool,
+    memory: bool,
+}
+
+/// Opens a database in memory, then connects.
+///
+/// The path is the name it was asked for by rather than the one the
+/// engine spells it with: the engine mints a unique name per database
+/// so two of them never share a writer, and that counter is its
+/// business and not a caller's.
+fn memory(config: Config) -> std::result::Result<Opened, ZuError> {
+    let database = Database::memory_with(config)?;
+    let conn = database.connect()?;
+    Ok(Opened {
+        conn,
+        spelling: Spelling::default(),
+        path: MEMORY.to_string(),
+        read_only: false,
+        memory: true,
+    })
 }
 
 /// Opens or creates, then connects.
@@ -300,6 +384,7 @@ fn open(path: PathBuf, read_only: bool, config: Config) -> std::result::Result<O
         spelling: Spelling::default(),
         path: stored,
         read_only,
+        memory: false,
     })
 }
 
@@ -315,6 +400,13 @@ impl Connection {
     #[napi(getter)]
     pub fn read_only(&self) -> bool {
         self.read_only
+    }
+
+    /// Whether the database behind it is in memory rather than on
+    /// disk, in which case nothing survives the last connection to it.
+    #[napi(getter)]
+    pub fn memory(&self) -> bool {
+        self.memory
     }
 
     /// Whether the connection is still open.

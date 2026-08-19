@@ -809,6 +809,11 @@ export declare class Connection {
   get path(): string
   /** Whether this connection refuses every statement that writes. */
   get readOnly(): boolean
+  /**
+   * Whether the database behind it is in memory rather than on
+   * disk, in which case nothing survives the last connection to it.
+   */
+  get memory(): boolean
   /** Whether the connection is still open. */
   get open(): boolean
   /**
@@ -1377,8 +1382,15 @@ export declare function abiVersion(): string
  * Creates one when the path holds nothing, which is what a first
  * program expects and what every embedded database does. A read-only
  * connection never creates anything.
+ *
+ * With no path, with `null`, or with `':memory:'`, the database is in
+ * memory and no file is made anywhere. It is the whole engine and not
+ * a reduced one, so it takes writes and transactions and the appender
+ * exactly as a database on disk does, and it is gone when the last
+ * connection to it is. Options may stand where the path would in that
+ * case, so `connect({ threads: 2 })` is a call and not a mistake.
  */
-export declare function connect(path: string, options?: ConnectOptions | undefined | null): Promise<Connection>
+export declare function connect(path?: string | ConnectOptions | undefined | null, options?: ConnectOptions | undefined | null): Promise<Connection>
 
 /**
  * What a connection can be opened with.
