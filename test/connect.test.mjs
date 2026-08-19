@@ -184,3 +184,104 @@ test('a database in memory cannot be opened read-only', async (t) => {
     return true
   })
 })
+
+test('a duplicate is another connection to the same database', async (t) => {
+  // On a database in memory because that is the one with no path to
+  // reopen: nothing but the shared write side could carry the rows.
+  const conn = await connect()
+  t.after(() => conn.close())
+  await conn.exec("INSERT (p:person {id: 1, name: 'ada'})")
+
+  const other = await conn.duplicate()
+  t.after(() => other.close())
+  assert.deepEqual([...(await other.query('MATCH (p:person) RETURN p.name AS name'))], [{ name: 'ada' }])
+  await other.exec("INSERT (p:person {id: 2, name: 'zoe'})")
+  assert.equal((await conn.query('MATCH (p:person) RETURN p.name AS name')).length, 2)
+})
+
+test('a duplicate says what the connection it came from says', async (t) => {
+  const { path } = await fresh(t)
+  const conn = await connect(path, { readOnly: true })
+  t.after(() => conn.close())
+  const other = await conn.duplicate()
+  t.after(() => other.close())
+
+  assert.equal(other.path, conn.path)
+  assert.equal(other.readOnly, true)
+  assert.equal(other.memory, false)
+  assert.equal(other.open, true)
+})
+
+test('a duplicate outlives the connection it was made from', async (t) => {
+  // It is a connection and not a view of one, which is what lets a pool
+  // hand its seed back.
+  const conn = await connect()
+  await conn.exec("INSERT (p:person {id: 1, name: 'ada'})")
+  const other = await conn.duplicate()
+  t.after(() => other.close())
+
+  conn.close()
+  assert.deepEqual([...(await other.query('MATCH (p:person) RETURN p.name AS name'))], [{ name: 'ada' }])
+})
+
+test('a duplicate has a transaction of its own', async (t) => {
+  const conn = await connect()
+  t.after(() => conn.close())
+  await conn.exec("INSERT (p:person {id: 1, name: 'ada'})")
+  const other = await conn.duplicate()
+  t.after(() => other.close())
+
+  const work = await conn.transaction()
+  assert.equal(conn.inTransaction, true)
+  assert.equal(other.inTransaction, false)
+  await work.rollback()
+})
+
+test('a duplicate spells values the way the connection it came from does', async (t) => {
+  const conn = await connect({ bigIntMode: 'number' })
+  t.after(() => conn.close())
+  await conn.exec("INSERT (p:person {id: 1, name: 'ada'})")
+  const other = await conn.duplicate()
+  t.after(() => other.close())
+
+  assert.deepEqual([...(await other.query('MATCH (p:person) RETURN p.id AS id'))], [{ id: 1 }])
+})
+
+test('two connections run at once where one would queue', async (t) => {
+  const conn = await connect()
+  t.after(() => conn.close())
+  await conn.exec("INSERT (p:person {id: 1, name: 'ada'})")
+  const other = await conn.duplicate()
+  t.after(() => other.close())
+
+  const both = await Promise.all([
+    conn.query('MATCH (p:person) RETURN p.name AS name'),
+    other.query('MATCH (p:person) RETURN p.name AS name'),
+  ])
+  assert.deepEqual(both.map((rows) => [...rows]), [[{ name: 'ada' }], [{ name: 'ada' }]])
+})
+
+test('a closed connection duplicates nothing', async () => {
+  const conn = await connect()
+  conn.close()
+
+  await assert.rejects(() => conn.duplicate(), (err) => {
+    assert.equal(err.name, 'ZuUsageError')
+    assert.match(err.message, /closed/)
+    return true
+  })
+})
+
+test('a duplicate closes with `await using` like the one it came from', async (t) => {
+  const conn = await connect()
+  t.after(() => conn.close())
+  await conn.exec("INSERT (p:person {id: 1, name: 'ada'})")
+
+  let held
+  {
+    await using other = await conn.duplicate()
+    held = other
+    assert.equal((await other.query('MATCH (p:person) RETURN p.name AS name')).length, 1)
+  }
+  assert.equal(held.open, false)
+})

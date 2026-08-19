@@ -53,9 +53,29 @@ for (const { name } of await conn.query(`MATCH (p:Person) RETURN p.name AS name`
 
 It is the whole engine and not a reduced one: writes, transactions, the appender, registered frames and streams, all of it, on bytes that are not a file. `conn.memory` says which kind you have, since `path` cannot quite answer it on a filesystem that allows a colon in a name. Nothing survives the last connection, which is the point: a test, a script, or five minutes with the language costs no cleanup and leaves no `social.zu1` in a directory somebody has to notice later.
 
+## A second connection, made from the first
+
+`duplicate()` is another connection to the same database, made from a connection rather than from a path. It is how a pool is written.
+
+```ts
+import { connect } from "zudb";
+
+await using conn = await connect("social.zu1");
+await using other = await conn.duplicate();
+
+const rows = await other.query(`MATCH (p:Person) RETURN p.name AS name`);
+console.log(rows.length);
+```
+
+It forks off the database the connection already holds rather than opening the file again, so it costs a schema load and no path lookup, and it works on a database in memory, where there is no path to open a second time. That was the gap worth closing: a pool that seeds itself and lets the first connection go had no way to a second one at all.
+
+The two are connections in every sense rather than two names for one. Each has its own prepared statements, its own caches and its own transaction, so a task taking one from a pool is not in whatever transaction the last borrower left open, and closing one does not close the other. What they share is the write side: they queue behind each other to write and each sees what the other has committed. Two of them also read at once, where two statements on one connection queue, which is the other reason to reach for this.
+
+The switches come across, including `bigIntMode` and `temporal`, because a pool handing out connections that answered differently from the one it was seeded with would be a trap. Other clients spell this call `cursor()`, after the way every embedded database has spelled it for thirty years. That name is taken here by `conn.cursor()`, which is a cursor over the rows of one statement and a different thing entirely, so this one says what it does.
+
 ## What works today
 
-`connect`, `query`, `exec`, `stream`, `close`, `dispose` and `await using`. Named parameters both ways, including lists, records and nesting. Every scalar the engine has, plus nodes, edges and paths with their tables named rather than numbered, and `ZuDate`, `ZuTime`, `ZuTimestamp` and `ZuDuration`, with `{ temporal: true }` and `toTemporal()` for the runtimes that have `Temporal`. Read-only connections, databases in memory, memory and thread limits. `bigIntMode`, per statement or per connection. An `AbortSignal` on any statement. The full error surface above, and `isZuError` to recognize it. Streaming, as an async iterable, as batches and as a Web Stream. Transactions, with `inTransaction` on the connection. An appender, for loading rows a batch at a time, and `load` for building a whole database out of columns and an edge list. Registered frames, so an Arrow table or an object of typed arrays is something a statement can match on without the rows being copied. `columnar`, for a result read down its columns as the buffers themselves rather than across its rows as objects. Prepared statements, compiled at the line that asked and run as often as wanted, and `explain` and `profile`, as a tree a program walks and as the listing a person reads. Both module formats, typed separately.
+`connect`, `query`, `exec`, `stream`, `close`, `dispose` and `await using`. `duplicate`, for a second connection made from the first. Named parameters both ways, including lists, records and nesting. Every scalar the engine has, plus nodes, edges and paths with their tables named rather than numbered, and `ZuDate`, `ZuTime`, `ZuTimestamp` and `ZuDuration`, with `{ temporal: true }` and `toTemporal()` for the runtimes that have `Temporal`. Read-only connections, databases in memory, memory and thread limits. `bigIntMode`, per statement or per connection. An `AbortSignal` on any statement. The full error surface above, and `isZuError` to recognize it. Streaming, as an async iterable, as batches and as a Web Stream. Transactions, with `inTransaction` on the connection. An appender, for loading rows a batch at a time, and `load` for building a whole database out of columns and an edge list. Registered frames, so an Arrow table or an object of typed arrays is something a statement can match on without the rows being copied. `columnar`, for a result read down its columns as the buffers themselves rather than across its rows as objects. Prepared statements, compiled at the line that asked and run as often as wanted, and `explain` and `profile`, as a tree a program walks and as the listing a person reads. Both module formats, typed separately.
 
 Build it with `npm run build`, and run the suite with `npm test`. Nothing is published yet, so `npm i zudb` is not a thing you can type at anybody's terminal, but everything it will do is built and installed on every run of the release workflow.
 

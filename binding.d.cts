@@ -1018,6 +1018,41 @@ export declare class Connection {
    */
   profile(statement: string, params?: Record<string, ZuParam> | null, options?: ZuStatementOptions | null): Promise<ZuProfile>
   /**
+   * Another connection to the same database, made from this one.
+   *
+   * This is how a pool is written. `connect()` opens the file again
+   * and looks the database up by path; this forks off the one this
+   * connection already holds, which costs a schema load and no
+   * lookup, and works on a database in memory, where there is no
+   * path to open a second time.
+   *
+   * ```js
+   * await using other = await conn.duplicate()
+   * const rows = await other.query('MATCH (p:person) RETURN p.name AS name')
+   * ```
+   *
+   * The two are connections in every sense rather than two names
+   * for one. Each has its own prepared statements, its own caches
+   * and its own transaction, so a task taking one from a pool is not
+   * in whatever transaction the last borrower left open, and closing
+   * one does not close the other. What they share is the write side:
+   * they queue behind each other to write and each sees what the
+   * other has committed, which is what two connections to one file
+   * have always done.
+   *
+   * Other clients call this `cursor()`, after the way every
+   * embedded database has spelled it for thirty years. That name is
+   * taken here by [`Connection::cursor`], which is a cursor over the
+   * rows of one statement and a different thing entirely, so this
+   * one says what it does.
+   *
+   * The switches this connection was opened with come across,
+   * including how it spells the values it gives back, because a pool
+   * handing out connections that answered differently from the one it
+   * was seeded with would be a trap nobody would look for.
+   */
+  duplicate(): Promise<Connection>
+  /**
    * Runs one statement and gives back a cursor over its rows.
    *
    * The pull underneath `stream`, which is what a program uses. The
