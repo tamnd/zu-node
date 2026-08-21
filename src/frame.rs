@@ -251,18 +251,33 @@ impl Bytes {
     /// what the words mean is the layout's business and does not change
     /// on the way.
     fn extend(&mut self, raw: &[u8]) {
+        // `as_chunks` hands back arrays rather than slices, so the width
+        // is in the type and the conversion that used to sit in the
+        // middle of each line is gone along with the panic it carried.
+        // A remainder is bytes that are not a whole element, which is a
+        // caller handing over something that is not this column, and
+        // dropping it is what `chunks_exact` did too.
         match self {
             Bytes::Eight(v) => v.extend(
-                raw.chunks_exact(8)
-                    .map(|word| u64::from_ne_bytes(word.try_into().expect("eight bytes"))),
+                raw.as_chunks::<8>()
+                    .0
+                    .iter()
+                    .copied()
+                    .map(u64::from_ne_bytes),
             ),
             Bytes::Four(v) => v.extend(
-                raw.chunks_exact(4)
-                    .map(|word| u32::from_ne_bytes(word.try_into().expect("four bytes"))),
+                raw.as_chunks::<4>()
+                    .0
+                    .iter()
+                    .copied()
+                    .map(u32::from_ne_bytes),
             ),
             Bytes::Two(v) => v.extend(
-                raw.chunks_exact(2)
-                    .map(|word| u16::from_ne_bytes(word.try_into().expect("two bytes"))),
+                raw.as_chunks::<2>()
+                    .0
+                    .iter()
+                    .copied()
+                    .map(u16::from_ne_bytes),
             ),
             Bytes::One(v) => v.extend_from_slice(raw),
             Bytes::Offsets(_) => {}
