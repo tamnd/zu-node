@@ -495,9 +495,12 @@ fn pairs(env: &Env, options: &Object<'_>, rows: u64) -> Result<Vec<(u32, u32)>> 
                 flat.len()
             )));
         }
+        // A pair is a pair in the type, so the two indexes below are not
+        // indexes any more and the odd tail `as_chunks` would hand back
+        // is already refused above.
         let mut pairs = Vec::with_capacity(flat.len() / 2);
-        for (at, edge) in flat.chunks_exact(2).enumerate() {
-            pairs.push((within(at, edge[0])?, within(at, edge[1])?));
+        for (at, &[from, to]) in flat.as_chunks::<2>().0.iter().enumerate() {
+            pairs.push((within(at, from)?, within(at, to)?));
         }
         return Ok(pairs);
     }
