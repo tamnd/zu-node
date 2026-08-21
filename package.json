@@ -64,7 +64,7 @@
     "test": "node --test \"test/*.test.mjs\"",
     "test:temporal": "node --harmony-temporal --test \"test/*.test.mjs\"",
     "test:bun": "bun test --timeout 60000 test/",
-    "test:deno": "deno test --no-check --allow-read --allow-write --allow-env --allow-ffi \"test/*.test.mjs\"",
+    "test:deno": "deno test --no-check --allow-read --allow-write --allow-env --allow-ffi --allow-run \"test/*.test.mjs\"",
     "check:types": "tsc --noEmit --project test/types/tsconfig.json",
     "check:package": "attw --pack .",
     "check:api": "api-extractor run --verbose",
