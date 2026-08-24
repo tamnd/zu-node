@@ -24,7 +24,7 @@ import {
   Vector,
 } from 'apache-arrow'
 
-import { fresh, isZuError, twoPeople } from './helper.mjs'
+import { fresh, isZuError, tickRate, twoPeople } from './helper.mjs'
 
 // The columns by name, since a test asks about one of them and the
 // order they were projected in is asserted where it is the question.
@@ -131,27 +131,69 @@ test('a column of booleans is one bit a row, least significant first', async (t)
 
 test('a temporal column says what its cells count', async (t) => {
   const { conn } = await fresh(t)
-  await conn.exec(
-    "INSERT (e:event {id: 1, on: DATE '2024-01-01', at: LOCAL DATETIME '2024-01-02T03:04:05', " +
-      "took: DURATION 'PT1H'})",
-  )
   const read = await conn.columnar(
-    'MATCH (e:event) RETURN e.on AS on, e.at AS at, e.took AS took',
+    "RETURN DATE '2024-01-01' AS began, LOCAL DATETIME '2024-01-02T03:04:05' AS moment, " +
+      "DURATION 'PT1H' AS took",
   )
-  const { on, at, took } = named(read)
+  const { began, moment, took } = named(read)
 
-  assert.equal(on.type, 'date')
-  assert.equal(on.unit, 'days')
-  assert.ok(on.values instanceof Int32Array)
-  assert.deepEqual([...on.values], [19_723])
+  assert.equal(began.type, 'date')
+  assert.equal(began.unit, 'days')
+  assert.ok(began.values instanceof Int32Array)
+  assert.deepEqual([...began.values], [19_723])
 
-  assert.equal(at.type, 'datetime')
-  assert.equal(at.unit, 'nanos')
-  assert.deepEqual([...at.values], [1_704_164_645_000_000_000n])
+  assert.equal(moment.type, 'datetime')
+  assert.equal(moment.unit, 'nanos')
+  assert.deepEqual([...moment.values], [1_704_164_645_000_000_000n])
 
   assert.equal(took.type, 'duration')
   assert.equal(took.unit, 'nanos')
   assert.deepEqual([...took.values], [3_600_000_000_000n])
+})
+
+// A temporal column does not always arrive as cells. The engine's
+// columnar sink fills a buffer for an integer, a real, a boolean and a
+// string, and has no arm for days, nanoseconds or months, so a date or
+// a duration reaching a projection any other way comes over as the
+// values themselves. Which of the two a statement gets is the plan's
+// business and not the caller's: the same property is cells in one
+// statement and values in another, and adding an unrelated column to
+// the projection is enough to move it. That is tamnd/zu#690.
+//
+// So `type` is what arrived rather than what the statement declared.
+// A column saying `date` with nothing in `values` would be a switch
+// that lands nowhere, and `type` exists to name the field that holds
+// the values. The invariant is what is asserted here rather than which
+// shape this particular statement produces, so the day the engine
+// fills a buffer for every temporal column this test still passes and
+// the one above it still says what a filled buffer holds.
+test('a temporal column that arrived without cells says so', async (t) => {
+  const { conn } = await fresh(t)
+  await conn.exec(
+    "INSERT (e:event {id: 1, began: DATE '2024-01-01', moment: LOCAL DATETIME '2024-01-02T03:04:05', " +
+      "took: DURATION 'PT1H'})",
+  )
+  const read = await conn.columnar(
+    'MATCH (e:event) RETURN e.began AS began, e.moment AS moment, e.took AS took',
+  )
+  const { began, moment, took } = named(read)
+
+  for (const column of [began, moment, took]) {
+    assert.equal(column.length, 1)
+    if (column.type === 'value') {
+      assert.equal(column.values, null)
+      assert.equal(column.unit, null)
+      assert.equal(column.zone, null)
+      assert.ok(column.items !== null, `${column.name} is a value column holding nothing`)
+    } else {
+      assert.ok(column.values !== null, `${column.name} says ${column.type} and has no cells`)
+      assert.ok(column.unit !== null)
+    }
+  }
+  // Whichever way they came, they are the values that went in.
+  assert.equal((began.items?.[0] ?? { days: began.values?.[0] }).days, 19_723)
+  assert.equal((moment.items?.[0] ?? { nanos: moment.values?.[0] }).nanos, 1_704_164_645_000_000_000n)
+  assert.equal((took.items?.[0] ?? { nanos: took.values?.[0] }).nanos, 3_600_000_000_000n)
 })
 
 test('a duration of months counts months rather than nanoseconds', async (t) => {
@@ -209,21 +251,21 @@ test('a column with nothing null has no bitmap at all', async (t) => {
 
 test('a column of nothing but nulls has a length and no buffer', async (t) => {
   const { conn } = await fresh(t)
-  const read = await conn.columnar('RETURN null AS nothing')
+  const read = await conn.columnar('RETURN null AS blank')
 
-  const [nothing] = read.columns
-  assert.equal(nothing.type, 'null')
-  assert.equal(nothing.length, 1)
-  assert.equal(nothing.values, null)
-  assert.equal(nothing.items, null)
+  const [blank] = read.columns
+  assert.equal(blank.type, 'null')
+  assert.equal(blank.length, 1)
+  assert.equal(blank.values, null)
+  assert.equal(blank.items, null)
 })
 
 test('what no buffer covers arrives as the values themselves', async (t) => {
   const { conn } = await twoPeople(t)
   const read = await conn.columnar(
-    'MATCH (p:person) RETURN p AS who, [p.id, p.id] AS pair, {name: p.name} AS record',
+    'MATCH (p:person) RETURN p AS who, [p.id, p.id] AS pair, {name: p.name} AS fields',
   )
-  const { who, pair, record } = named(read)
+  const { who, pair, fields } = named(read)
 
   assert.equal(who.type, 'value')
   assert.equal(who.values, null)
@@ -234,8 +276,8 @@ test('what no buffer covers arrives as the values themselves', async (t) => {
   assert.equal(pair.type, 'value')
   assert.deepEqual(pair.items[0], [1n, 1n])
 
-  assert.equal(record.type, 'value')
-  assert.deepEqual(record.items[1], { name: 'zoe' })
+  assert.equal(fields.type, 'value')
+  assert.deepEqual(fields.items[1], { name: 'zoe' })
 })
 
 test('a statement that matched nothing is columns of no rows', async (t) => {
@@ -355,16 +397,17 @@ test('the buffers are handed over rather than shared, so two reads are two buffe
 
 test('a million rows come back down one buffer and the loop stays free', async (t) => {
   const { conn } = await fresh(t)
-  await conn.exec("INSERT (n:number {id: 1, at: 1})")
+  await conn.exec("INSERT (n:numbers {id: 1, moment: 1})")
   const rows = 1_000_000
-  const appender = await conn.appender('number')
+  const appender = await conn.appender('numbers')
   for (let at = 2; at <= rows; at += 1) appender.appendRow([BigInt(at), BigInt(at)])
   await appender.close()
 
+  const idle = await tickRate()
   let ticks = 0
   const timer = setInterval(() => (ticks += 1), 1)
   const at = performance.now()
-  const read = await conn.columnar('MATCH (n:number) RETURN n.at AS at')
+  const read = await conn.columnar('MATCH (n:numbers) RETURN n.moment AS moment')
   const took = performance.now() - at
   clearInterval(timer)
 
@@ -372,13 +415,17 @@ test('a million rows come back down one buffer and the loop stays free', async (
   assert.equal(read.columns[0].values.length, rows)
   assert.equal(read.columns[0].values[rows - 1], BigInt(rows))
   // The whole read is on the threadpool, so the timer kept firing
-  // throughout it rather than queueing behind it. The bar is a tick
-  // every ten milliseconds of the read and not a fixed count, because
-  // a blocked loop fires none however long the read takes and a fixed
-  // count turns every speedup into a failure.
+  // throughout it rather than queueing behind it. The bar is a share of
+  // what this loop manages with nothing to do rather than a rate of its
+  // own: a blocked loop fires no timer at all however long the read
+  // takes, and how fast a free one fires is the platform's business. A
+  // fifth, which is far enough below idle to survive a loaded machine
+  // and still a hundred times what a loop parked in the addon would
+  // give.
   assert.ok(
-    ticks > took / 10,
-    `the event loop ticked ${ticks} times in ${took.toFixed(0)} ms`,
+    ticks / took > idle / 5,
+    `the event loop ticked ${ticks} times in ${took.toFixed(0)} ms, ` +
+      `against ${(idle * took).toFixed(0)} with nothing to do`,
   )
 })
 
@@ -418,16 +465,16 @@ function tableOf(read) {
 test('the columns become an Arrow table without being copied', async (t) => {
   const { conn } = await fresh(t)
   await conn.exec(
-    "INSERT (e:event {id: 1, name: 'ada', ratio: 1.5, hot: true, on: DATE '2024-01-01', " +
+    "INSERT (e:event {id: 1, name: 'ada', ratio: 1.5, hot: true, began: DATE '2024-01-01', " +
       "took: DURATION 'PT1H'})",
   )
   await conn.exec(
-    "INSERT (e:event {id: 2, name: 'zoe', ratio: 2.5, hot: false, on: DATE '2024-02-01', " +
+    "INSERT (e:event {id: 2, name: 'zoe', ratio: 2.5, hot: false, began: DATE '2024-02-01', " +
       "took: DURATION 'PT2H'})",
   )
   const read = await conn.columnar(
     'MATCH (e:event) RETURN e.id AS id, e.name AS name, e.ratio AS ratio, e.hot AS hot, ' +
-      'e.on AS on, e.took AS took',
+      'e.began AS began, e.took AS took',
   )
   const table = tableOf(read)
 
@@ -439,7 +486,7 @@ test('the columns become an Arrow table without being copied', async (t) => {
       'name:Utf8',
       'ratio:Float64',
       'hot:Bool',
-      'on:Date32<DAY>',
+      'began:Date32<DAY>',
       'took:Duration<NANOSECOND>',
     ],
   )

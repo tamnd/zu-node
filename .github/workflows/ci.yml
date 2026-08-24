@@ -304,3 +304,40 @@ jobs:
       # with an `export =` in it. The package job above is what checks
       # the types, through the resolution a user actually gets.
       - run: npm run test:deno
+
+  # The shared corpus, which is the same cases the engine runs against
+  # itself and every other client runs against theirs. A job of its own
+  # because it needs a second checkout, and on one platform because what
+  # it asks about is this client's value mapping rather than anything the
+  # operating system decides.
+  corpus:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - uses: Swatinem/rust-cache@v2
+      # The cases are versioned with the engine, so the revision comes
+      # out of the pin this client already builds against rather than
+      # being written down a second time and drifting away from it.
+      - id: pin
+        run: |
+          rev=$(sed -n 's/^zudb = .*rev = "\([0-9a-f]*\)".*/\1/p' Cargo.toml)
+          test -n "$rev"
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          repository: tamnd/zu
+          ref: ${{ steps.pin.outputs.rev }}
+          path: engine
+      - run: npm ci
+      - run: npm run build:debug
+      # The runner first, because its summary is the line a person reads
+      # when this job goes red, and the suite second, because it is the
+      # one that knows which cases this client is allowed to leave
+      # unanswered.
+      - run: node conformance/cli.mjs engine/conformance/cases
+      - run: node --test "test/conformance*.test.mjs"
+        env:
+          ZU_CASES: engine/conformance/cases

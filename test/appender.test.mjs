@@ -313,7 +313,7 @@ test('something that is not an array of rows is refused', async (t) => {
 test('every column type the engine stores takes a value', async (t) => {
   const { conn } = await fresh(t)
   await conn.exec(
-    "INSERT (e:event {id: 1, on: DATE '2024-01-02', at: LOCAL DATETIME '2024-01-02T03:04:05', " +
+    "INSERT (e:event {id: 1, began: DATE '2024-01-02', moment: LOCAL DATETIME '2024-01-02T03:04:05', " +
       "took: DURATION 'PT1H', hot: true, ratio: 1.5})",
   )
 
@@ -329,12 +329,12 @@ test('every column type the engine stores takes a value', async (t) => {
   assert.equal(await rows.close(), 1)
 
   const found = await conn.query(
-    'MATCH (e:event) RETURN e.id AS id, e.on AS on, e.at AS at, e.took AS took, e.hot AS hot, ' +
+    'MATCH (e:event) RETURN e.id AS id, e.began AS began, e.moment AS moment, e.took AS took, e.hot AS hot, ' +
       'e.ratio AS ratio',
   )
   assert.equal(found.length, 2)
-  assert.equal(found[1].on.days, 20_000)
-  assert.equal(found[1].at.nanos, 1_700_000_000_000_000_000n)
+  assert.equal(found[1].began.days, 20_000)
+  assert.equal(found[1].moment.nanos, 1_700_000_000_000_000_000n)
   assert.equal(found[1].took.nanos, 7_200_000_000_000n)
   assert.equal(found[1].hot, false)
   assert.equal(found[1].ratio, 2.5)
@@ -342,7 +342,7 @@ test('every column type the engine stores takes a value', async (t) => {
 
 test('a timestamp with an offset does not go in a column of local ones', async (t) => {
   const { conn } = await fresh(t)
-  await conn.exec("INSERT (e:event {id: 1, at: LOCAL DATETIME '2024-01-02T03:04:05'})")
+  await conn.exec("INSERT (e:event {id: 1, moment: LOCAL DATETIME '2024-01-02T03:04:05'})")
 
   const rows = await conn.appender('event')
   assert.throws(

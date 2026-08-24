@@ -36,7 +36,10 @@
 //! JavaScript values `query` would have made, and a column of nothing
 //! but nulls has a length and nothing else, because there is nothing to
 //! put in a buffer. Both are named by the column's `type` rather than
-//! found out by looking.
+//! found out by looking, and so is the third thing that is sometimes
+//! not a buffer: the engine's sink has no arm for days, nanoseconds or
+//! months, so a temporal column reaching a projection by the wrong path
+//! comes over as values too (tamnd/zu#690).
 //!
 //! `bigIntMode` says nothing here. A columnar read has one physical
 //! layout per type and an INT64 column is 64 bit cells whatever a
@@ -125,10 +128,30 @@ fn taken(columns: Columns<'_>, gqlstatus: &'static str, notices: Vec<DiagnosticR
         .into_iter()
         .map(|column| Out {
             name: column.name.to_string(),
-            kind: kind(&column.ty),
-            unit: unit(&column.ty),
+            // What arrived rather than what the statement declared,
+            // which is the same thing except for the temporal types.
+            // The engine's sink fills a buffer for an integer, a real,
+            // a boolean and a string and has no arm for days,
+            // nanoseconds or months, so a date or a duration reaching a
+            // projection any other way comes over as the values
+            // themselves, and which of the two a statement gets is the
+            // plan's business rather than the caller's. A caller told
+            // `date` who then read `values` would find nothing in it,
+            // so `type` says what is there, and `unit` and `zone` say
+            // nothing where there are no cells to describe. The gap
+            // itself is tamnd/zu#690.
+            kind: match column.data {
+                ColumnData::Complex(_) => "value",
+                _ => kind(&column.ty),
+            },
+            unit: match column.data {
+                ColumnData::Complex(_) => None,
+                _ => unit(&column.ty),
+            },
             zone: match column.ty {
-                ColumnType::ZonedTime { offset } | ColumnType::ZonedDatetime { offset } => {
+                ColumnType::ZonedTime { offset } | ColumnType::ZonedDatetime { offset }
+                    if !matches!(column.data, ColumnData::Complex(_)) =>
+                {
                     Some(offset as i32)
                 }
                 _ => None,
@@ -141,7 +164,13 @@ fn taken(columns: Columns<'_>, gqlstatus: &'static str, notices: Vec<DiagnosticR
                 ColumnData::Days(values) => Held::Days(values),
                 ColumnData::Nanos(values) => Held::Nanos(values),
                 ColumnData::Months(values) => Held::Months(values),
-                ColumnData::Str(column) => Held::Str {
+                // A byte string column keeps the two buffers a string
+                // column keeps, so it arrives the same way and it is
+                // `type` that tells the two apart. The bytes under a
+                // BYTES column are octets and decoding them as text is
+                // the caller's mistake to avoid, which is why the type
+                // says which it is.
+                ColumnData::Str(column) | ColumnData::Bytes(column) => Held::Str {
                     bytes: column.bytes,
                     offsets: column.offsets,
                 },
@@ -177,6 +206,7 @@ fn kind(ty: &ColumnType) -> &'static str {
         ColumnType::Int => "int",
         ColumnType::Float => "float",
         ColumnType::Str => "string",
+        ColumnType::Bytes => "bytes",
         ColumnType::Date => "date",
         ColumnType::LocalTime | ColumnType::ZonedTime { .. } => "time",
         ColumnType::LocalDatetime | ColumnType::ZonedDatetime { .. } => "datetime",

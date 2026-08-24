@@ -46,6 +46,13 @@ test('a whole number binds as an integer and a fractional one as a float', async
   assert.equal(typeof (await roundTrip(conn, 1)), 'bigint')
   assert.equal(await roundTrip(conn, 1.5), 1.5)
   assert.equal(typeof (await roundTrip(conn, 1.5)), 'number')
+
+  // Negative zero is whole and is still a float, because there is no
+  // integer that is negative zero and binding it as one throws away the
+  // sign the caller went out of their way to write.
+  const zero = await roundTrip(conn, -0)
+  assert.equal(typeof zero, 'number')
+  assert.ok(Object.is(zero, -0), `-0 came back as ${zero}`)
 })
 
 test('a string, a boolean, a null and an undefined bind as themselves', async (t) => {

@@ -79,6 +79,10 @@ export type ZuTemporalValue = typeof globalThis extends {
  * default and `Temporal` values on a connection opened with
  * `{ temporal: true }`. A time with an offset is the exception in both
  * directions: `Temporal` has no type for one, so it stays a `ZuTime`.
+ *
+ * BYTES is a `Uint8Array` and not a string. The bytes are octets and
+ * need not be text at all, so decoding them is the caller's call to
+ * make rather than this client's to make for them.
  */
 export type ZuValue =
   | null
@@ -94,6 +98,7 @@ export type ZuValue =
   | ZuTimestamp
   | ZuDuration
   | ZuTemporalValue
+  | Uint8Array
   | ZuValue[]
   | { [field: string]: ZuValue }
 
@@ -102,11 +107,18 @@ export type ZuValue =
  *
  * Wider than what comes out, because a `number` that is whole binds as
  * INT64 and `undefined` binds as null, which is what makes an optional
- * field of a plain object pass straight through. A `Temporal` value
- * binds as the zu value it is on every connection, whether or not the
- * connection asked for `Temporal` on the way out, because recognizing
- * one costs a property read and refusing one would be a rule nobody
- * could guess.
+ * field of a plain object pass straight through. Negative zero is the
+ * exception and binds as FLOAT64: no INT64 is negative zero, so binding
+ * it as one throws away the sign the caller went out of their way to
+ * write. A `Temporal` value binds as the zu value it is on every
+ * connection, whether or not the connection asked for `Temporal` on the
+ * way out, because recognizing one costs a property read and refusing
+ * one would be a rule nobody could guess.
+ *
+ * A `Uint8Array` binds as BYTES, and it is the only typed array that
+ * binds at all: an `Int32Array` is a buffer somebody meant to load
+ * rather than a value a statement holds, so it is refused instead of
+ * being read as the empty object it has no properties to be.
  */
 export type ZuParam =
   | null
@@ -120,6 +132,7 @@ export type ZuParam =
   | ZuTimestamp
   | ZuDuration
   | ZuTemporalValue
+  | Uint8Array
   | ZuParam[]
   | { [field: string]: ZuParam }
 
@@ -155,10 +168,11 @@ export type ZuAppendValue =
  * One value of a registered frame's column, when the column is written
  * as a plain array.
  *
- * The same values an appender takes, without the bytes: a column of
- * BYTES is a column no statement can read back yet, so registering one
- * would be naming data the caller cannot get at. There is no `null`
- * either, for the reason there is none in a row of an appender.
+ * The same values an appender takes, without the bytes: a frame column
+ * is a run of values the engine reads where it lies, and byte strings
+ * are not a run of anything, so a BYTES column is refused rather than
+ * copied into a shape it does not have. There is no `null` either, for
+ * the reason there is none in a row of an appender.
  */
 export type ZuFrameValue =
   | boolean
@@ -299,6 +313,20 @@ export interface ZuNotice {
  * `zone`. `value` is the fallback for what no fixed width cell covers,
  * which is nodes, rels, paths, lists and records, and `null` is a
  * column that held nothing else.
+ *
+ * `bytes` arrives in the two buffers `string` arrives in and is not
+ * one: the bytes are octets and a reader that decoded them as text
+ * would be handed something it cannot decode, which is why the two
+ * have separate names for one layout.
+ *
+ * This is what arrived rather than what the statement declared, and the
+ * two differ for the temporal types today. The engine's columnar sink
+ * has no buffer for days, nanoseconds or months, so a date, a time or a
+ * duration sometimes comes over as the values themselves, and which of
+ * the two a statement gets is the plan's business rather than the
+ * caller's. Such a column is `value` with its `ZuDate` and `ZuDuration`
+ * objects in `items`, not `date` with an empty `values`, so that a
+ * switch on `type` always lands on a field that holds something.
  */
 export type ZuColumnType =
   | 'null'
@@ -306,6 +334,7 @@ export type ZuColumnType =
   | 'int'
   | 'float'
   | 'string'
+  | 'bytes'
   | 'date'
   | 'time'
   | 'datetime'
@@ -319,8 +348,8 @@ export type ZuColumnType =
  * not apply, so reading one is a switch on `type` rather than a series
  * of tests for what is there. Which field carries the values follows
  * from the type: `values` for everything of a fixed width, `data` and
- * `offsets` for strings, `items` for what no buffer covers, and none of
- * them for a column of nulls.
+ * `offsets` for strings and byte strings, `items` for what no buffer
+ * covers, and none of them for a column of nulls.
  *
  * The buffers are the engine's own, handed over rather than copied, and
  * they are laid out the way Arrow lays them out: values end to end, a
@@ -339,12 +368,16 @@ export interface ZuColumn {
    * booleans, least significant bit first.
    */
   readonly values: BigInt64Array | Float64Array | Int32Array | Uint8Array | null
-  /** The bytes of every string end to end, for a string column. */
+  /**
+   * The bytes of every value end to end, for a `string` or a `bytes`
+   * column.
+   */
   readonly data: Uint8Array | null
   /**
-   * `length + 1` offsets into `data`, for a string column. Narrow until
-   * the bytes pass what a 32 bit offset addresses, which is the
-   * difference Arrow calls Utf8 against LargeUtf8.
+   * `length + 1` offsets into `data`, for a `string` or a `bytes`
+   * column. Narrow until the bytes pass what a 32 bit offset
+   * addresses, which is the difference Arrow calls Utf8 against
+   * LargeUtf8.
    */
   readonly offsets: Int32Array | BigInt64Array | null
   /** The values themselves, for a column of type `value`. */
@@ -357,7 +390,11 @@ export interface ZuColumn {
   readonly validity: Uint8Array | null
   /** How many rows are null, which is zero when `validity` is null. */
   readonly nulls: number
-  /** What one cell counts: `days`, `nanos` or `months`. */
+  /**
+   * What one cell counts: `days`, `nanos` or `months`. Null where there
+   * are no cells to count, which includes a temporal column that
+   * arrived as a `value` column.
+   */
   readonly unit: 'days' | 'nanos' | 'months' | null
   /** Minutes east of UTC, for a column of zoned times or datetimes. */
   readonly zone: number | null
