@@ -496,7 +496,7 @@ fn pairs(env: &Env, options: &Object<'_>, rows: u64) -> Result<Vec<(u32, u32)>> 
             )));
         }
         let mut pairs = Vec::with_capacity(flat.len() / 2);
-        for (at, edge) in flat.chunks_exact(2).enumerate() {
+        for (at, edge) in flat.as_chunks::<2>().0.iter().enumerate() {
             pairs.push((within(at, edge[0])?, within(at, edge[1])?));
         }
         return Ok(pairs);

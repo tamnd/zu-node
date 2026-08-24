@@ -36,6 +36,13 @@ const run = promisify(execFile)
 const root = fileURLToPath(new URL('../', import.meta.url))
 const sleep = (ms) => new Promise((wake) => setTimeout(wake, ms))
 
+// Whether this runtime can start a copy of itself that loads the addon.
+// Node and Bun can. Deno cannot, twice over: spawning at all wants
+// --allow-run, and a Deno child is granted nothing of what its parent
+// holds, so the copy would fail to open the library rather than fail to
+// exit, which is not the question the one test below is asking.
+const SPAWNS = !process.versions.deno
+
 // A database with a crowd in it, built by a load rather than by an
 // insert, because three thousand people written as one statement is a
 // megabyte of GQL and most of this file's time would go on parsing it.
@@ -208,7 +215,7 @@ test('a watch wants a function, and an interval that is one', async (t) => {
   }
 })
 
-test('a watch does not hold the program open', async (t) => {
+test('a watch does not hold the program open', { skip: !SPAWNS }, async (t) => {
   const { path } = await crowd(t)
 
   // A watch nobody stopped is a timer that would otherwise run for as

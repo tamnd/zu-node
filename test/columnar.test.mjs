@@ -24,7 +24,7 @@ import {
   Vector,
 } from 'apache-arrow'
 
-import { fresh, isZuError, twoPeople } from './helper.mjs'
+import { fresh, isZuError, tickRate, twoPeople } from './helper.mjs'
 
 // The columns by name, since a test asks about one of them and the
 // order they were projected in is asserted where it is the question.
@@ -403,6 +403,7 @@ test('a million rows come back down one buffer and the loop stays free', async (
   for (let at = 2; at <= rows; at += 1) appender.appendRow([BigInt(at), BigInt(at)])
   await appender.close()
 
+  const idle = await tickRate()
   let ticks = 0
   const timer = setInterval(() => (ticks += 1), 1)
   const at = performance.now()
@@ -414,13 +415,17 @@ test('a million rows come back down one buffer and the loop stays free', async (
   assert.equal(read.columns[0].values.length, rows)
   assert.equal(read.columns[0].values[rows - 1], BigInt(rows))
   // The whole read is on the threadpool, so the timer kept firing
-  // throughout it rather than queueing behind it. The bar is a tick
-  // every ten milliseconds of the read and not a fixed count, because
-  // a blocked loop fires none however long the read takes and a fixed
-  // count turns every speedup into a failure.
+  // throughout it rather than queueing behind it. The bar is a share of
+  // what this loop manages with nothing to do rather than a rate of its
+  // own: a blocked loop fires no timer at all however long the read
+  // takes, and how fast a free one fires is the platform's business. A
+  // fifth, which is far enough below idle to survive a loaded machine
+  // and still a hundred times what a loop parked in the addon would
+  // give.
   assert.ok(
-    ticks > took / 10,
-    `the event loop ticked ${ticks} times in ${took.toFixed(0)} ms`,
+    ticks / took > idle / 5,
+    `the event loop ticked ${ticks} times in ${took.toFixed(0)} ms, ` +
+      `against ${(idle * took).toFixed(0)} with nothing to do`,
   )
 })
 
