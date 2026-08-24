@@ -35,12 +35,12 @@ const conn = await connect(join(dir, 'bench.zu1'))
 
 // The declaring insert is written with literals, because that is what
 // tells the engine what each column holds.
-await conn.exec("INSERT (p:person {id: 0, name: 'n0', on: DATE '2024-01-01'})")
+await conn.exec("INSERT (p:person {id: 0, name: 'n0', began: DATE '2024-01-01'})")
 for (let start = 1; start < ROWS; start += BATCH) {
   const end = Math.min(start + BATCH, ROWS)
   const parts = []
   for (let ix = start; ix < end; ix++) {
-    parts.push(`(p${ix}:person {id: ${ix}, name: 'n${ix}', on: DATE '2024-01-01'})`)
+    parts.push(`(p${ix}:person {id: ${ix}, name: 'n${ix}', began: DATE '2024-01-01'})`)
   }
   await conn.exec(`INSERT ${parts.join(', ')}`)
 }
@@ -104,7 +104,7 @@ const cases = [
     // holding one integer. The number to read the next one against.
     name: 'scan, one DATE column',
     per: 'row',
-    run: () => conn.query('MATCH (p:person) RETURN p.on AS on'),
+    run: () => conn.query('MATCH (p:person) RETURN p.began AS began'),
   },
   ...(temporal
     ? [
@@ -115,7 +115,7 @@ const cases = [
           // whatever the runtime's own class costs to construct.
           name: 'scan, one DATE as Temporal',
           per: 'row',
-          run: () => temporal.query('MATCH (p:person) RETURN p.on AS on'),
+          run: () => temporal.query('MATCH (p:person) RETURN p.began AS began'),
         },
       ]
     : []),

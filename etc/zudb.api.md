@@ -172,6 +172,7 @@ export type ZuColumnType =
 | 'int'
 | 'float'
 | 'string'
+| 'bytes'
 | 'date'
 | 'time'
 | 'datetime'
@@ -324,6 +325,7 @@ export type ZuParam =
 | ZuTimestamp
 | ZuDuration
 | ZuTemporalValue
+| Uint8Array
 | ZuParam[]
 | { [field: string]: ZuParam }
 
@@ -533,6 +535,7 @@ export type ZuValue =
 | ZuTimestamp
 | ZuDuration
 | ZuTemporalValue
+| Uint8Array
 | ZuValue[]
 | { [field: string]: ZuValue }
 

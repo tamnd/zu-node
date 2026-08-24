@@ -189,18 +189,18 @@ test('a column is read out of a typed array as the numbers it holds', async (t) 
     nodes: 'person',
     rels: 'knows',
     columns: {
-      small: new Int8Array([-1, 2]),
+      tiny: new Int8Array([-1, 2]),
       wide: new BigInt64Array([1n << 40n, -5n]),
       ratio: new Float32Array([0.5, 1.25]),
-      exact: new Float64Array([0.1, 2.5]),
+      precise: new Float64Array([0.1, 2.5]),
     },
   })
   const conn = await opened(t, path)
   const rows = await conn.query(
-    'MATCH (p:person) RETURN p.small AS small, p.wide AS wide, p.ratio AS ratio, p.exact AS exact',
+    'MATCH (p:person) RETURN p.tiny AS tiny, p.wide AS wide, p.ratio AS ratio, p.precise AS precise',
   )
   assert.deepEqual(
-    rows.map((row) => [row.small, row.wide, row.ratio, row.exact]),
+    rows.map((row) => [row.tiny, row.wide, row.ratio, row.precise]),
     [
       [-1n, 1n << 40n, 0.5, 0.1],
       [2n, -5n, 1.25, 2.5],
@@ -211,7 +211,7 @@ test('a column is read out of a typed array as the numbers it holds', async (t) 
 test('a column of every kind reads back as what it was', async (t) => {
   const path = await spot(t)
   const columns = {
-    count: [1, -2],
+    tally: [1, -2],
     ratio: [1.5, -0.25],
     flag: [true, false],
     name: ['ada', 'grace'],
@@ -227,7 +227,7 @@ test('a column of every kind reads back as what it was', async (t) => {
   const rows = await conn.query(
     `MATCH (p:person) RETURN ${names.map((name) => `p.${name} AS ${name}`).join(', ')}`,
   )
-  assert.equal(rows[0].count, 1n)
+  assert.equal(rows[0].tally, 1n)
   assert.equal(rows[0].ratio, 1.5)
   assert.equal(rows[0].flag, true)
   assert.equal(rows[0].name, 'ada')
@@ -237,7 +237,7 @@ test('a column of every kind reads back as what it was', async (t) => {
   assert.equal(rows[0].took.nanos, 86_402_000_000_000n)
   assert.equal(rows[0].aged.months, 14n)
   assert.deepEqual(
-    [rows[1].count, rows[1].ratio, rows[1].flag, rows[1].name],
+    [rows[1].tally, rows[1].ratio, rows[1].flag, rows[1].name],
     [-2n, -0.25, false, 'grace'],
   )
 })

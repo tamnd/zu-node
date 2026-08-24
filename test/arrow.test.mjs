@@ -97,18 +97,18 @@ test('floats and booleans are the Arrow types they are', async (t) => {
 test('a temporal column is the Arrow type that counts the same thing', async (t) => {
   const { conn } = await fresh(t)
   await conn.exec(
-    "INSERT (e:event {id: 1, on: DATE '2024-01-01', at: LOCAL DATETIME '2024-01-02T03:04:05', " +
+    "INSERT (e:event {id: 1, began: DATE '2024-01-01', moment: LOCAL DATETIME '2024-01-02T03:04:05', " +
       "took: DURATION 'PT1H'})",
   )
   const table = read(
-    await conn.arrow('MATCH (e:event) RETURN e.on AS on, e.at AS at, e.took AS took'),
+    await conn.arrow('MATCH (e:event) RETURN e.began AS began, e.moment AS moment, e.took AS took'),
   )
 
   // A date is days, a datetime is nanoseconds, and a day-time duration
   // is a duration rather than an interval, which is the difference
   // between a length of time and a calendar step.
-  assert.equal(String(column(table, 'on').type), 'Date32<DAY>')
-  assert.equal(String(column(table, 'at').type), 'Timestamp<NANOSECOND>')
+  assert.equal(String(column(table, 'began').type), 'Date32<DAY>')
+  assert.equal(String(column(table, 'moment').type), 'Timestamp<NANOSECOND>')
   assert.equal(String(column(table, 'took').type), 'Duration<NANOSECOND>')
 })
 
@@ -324,23 +324,23 @@ test('the bytes are handed over rather than shared, so two reads are two buffers
 
 test('a million rows are one stream and the loop stays free while it is written', async (t) => {
   const { conn } = await fresh(t)
-  await conn.exec('INSERT (n:number {id: 1, at: 1})')
+  await conn.exec('INSERT (n:numbers {id: 1, moment: 1})')
   const rows = 1_000_000
-  const appender = await conn.appender('number')
+  const appender = await conn.appender('numbers')
   for (let at = 2; at <= rows; at += 1) appender.appendRow([BigInt(at), BigInt(at)])
   await appender.close()
 
   let ticks = 0
   const timer = setInterval(() => (ticks += 1), 1)
   const at = performance.now()
-  const answer = await conn.arrow('MATCH (n:number) RETURN n.at AS at')
+  const answer = await conn.arrow('MATCH (n:numbers) RETURN n.moment AS moment')
   const took = performance.now() - at
   clearInterval(timer)
 
   assert.equal(answer.rows, rows)
   const table = read(answer)
   assert.equal(table.numRows, rows)
-  assert.equal(column(table, 'at').get(rows - 1), BigInt(rows))
+  assert.equal(column(table, 'moment').get(rows - 1), BigInt(rows))
   // The whole write is on the threadpool, so the timer kept firing
   // throughout it rather than queueing behind it. The bar is a tick
   // every ten milliseconds of the read and not a fixed count, because a

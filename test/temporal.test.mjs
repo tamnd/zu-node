@@ -242,14 +242,14 @@ test('a Temporal value goes out the way it came in', has, async (t) => {
 
 test('a statement and a stream spell temporal values the same way', has, async (t) => {
   const { conn } = await fresh(t, { temporal: true })
-  await conn.exec("INSERT (d:day {id: 1, on: DATE '2024-01-01'})")
+  await conn.exec("INSERT (d:dated {id: 1, began: DATE '2024-01-01'})")
 
-  const rows = await conn.query('MATCH (d:day) RETURN d.on AS on')
-  assert.equal(tag(rows[0].on), '[object Temporal.PlainDate]')
+  const rows = await conn.query('MATCH (d:dated) RETURN d.began AS began')
+  assert.equal(tag(rows[0].began), '[object Temporal.PlainDate]')
 
-  const stream = conn.stream('MATCH (d:day) RETURN d.on AS on')
+  const stream = conn.stream('MATCH (d:dated) RETURN d.began AS began')
   const seen = []
-  for await (const row of stream) seen.push(row.on)
+  for await (const row of stream) seen.push(row.began)
   assert.equal(seen.length, 1)
   assert.equal(tag(seen[0]), '[object Temporal.PlainDate]')
   assert.equal(seen[0].day, 1)

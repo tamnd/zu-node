@@ -568,6 +568,11 @@ pub fn to_js<'env>(
         Value::Int(n) => int(env, column, *n, shape.spelling.ints),
         Value::Float(f) => (*f).into_unknown(env),
         Value::Str(s) => s.as_str().into_unknown(env),
+        // GV35, a byte string, which is octets and not text. It comes
+        // back as a `Uint8Array` rather than a string because the
+        // bytes need not be UTF-8 at all, and a client that decoded
+        // them would refuse half the values the type exists for.
+        Value::Bytes(bytes) => Uint8Array::new(bytes.clone()).into_unknown(env),
         Value::Node { table, offset } => node(*table, *offset, &shape.names)
             .into_instance(env)?
             .into_unknown(env),
@@ -796,9 +801,17 @@ fn nested(env: &Env, name: &str, value: Unknown<'_>, depth: usize) -> Result<Val
         // float. The alternative, binding every number as a float,
         // makes `{ id: 1 }` fail to match a row whose id is an integer,
         // which is the first thing anybody writes.
+        //
+        // Negative zero is the exception, and the one whole number that
+        // says something an integer cannot say. There is no INT64 that
+        // is negative zero, so binding it as one throws away the sign a
+        // caller went out of their way to write, and a statement
+        // comparing against a FLOAT64 -0.0 then compares against 0
+        // instead.
         ValueType::Number => {
             let n = f64::from_unknown(value)?;
-            if n.fract() == 0.0 && n.abs() <= 9_007_199_254_740_992.0 {
+            let negative_zero = n == 0.0 && n.is_sign_negative();
+            if n.fract() == 0.0 && n.abs() <= 9_007_199_254_740_992.0 && !negative_zero {
                 Ok(Value::Int(n as i64))
             } else {
                 Ok(Value::Float(n))
@@ -815,6 +828,26 @@ fn nested(env: &Env, name: &str, value: Unknown<'_>, depth: usize) -> Result<Val
 fn from_object(env: &Env, name: &str, value: Unknown<'_>, depth: usize) -> Result<Value> {
     if let Some(temporal) = temporal_from(env, &value)? {
         return Ok(Value::Temporal(temporal));
+    }
+    // A `Uint8Array` binds as GV35, a byte string, which is the one
+    // type whose values are octets rather than text. This goes before
+    // the array and before the record, because a typed array is
+    // neither: it answers no to `is_array` and has no own enumerable
+    // properties, so a plain object read would bind it as `{}` and
+    // compare against nothing.
+    if value.is_typedarray()? {
+        return match TypedArray::from_unknown(value)?.typed_array_type {
+            TypedArrayType::Uint8 | TypedArrayType::Uint8Clamped => {
+                Ok(Value::Bytes(Uint8Array::from_unknown(value)?.to_vec()))
+            }
+            _ => Err(Error::new(
+                Status::InvalidArg,
+                format!(
+                    "parameter {name} is a typed array of some other width, and the only one a \
+                     statement holds is a Uint8Array, which binds as BYTES"
+                ),
+            )),
+        };
     }
     let object = Object::from_unknown(value)?;
     if object.is_array()? {

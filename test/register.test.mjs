@@ -165,25 +165,25 @@ test('every kind of column a row can hold arrives as itself', async (t) => {
 
   await conn.register('kinds', {
     yes: [true, false],
-    small: new Int8Array([1, 2]),
+    tiny: new Int8Array([1, 2]),
     wide: new Uint32Array([3, 4]),
     narrow: new Float32Array([1.5, 2.5]),
     word: ['a', 'b'],
-    day: [new ZuDate(19723), new ZuDate(19754)],
+    dated: [new ZuDate(19723), new ZuDate(19754)],
     moment: [new ZuTimestamp(1_704_070_923_000_000_000n), new ZuTimestamp(0n)],
     span: [ZuDuration.ofNanos(90_000_000_000n), ZuDuration.ofNanos(0n)],
   })
 
   const rows = await conn.query(
-    'MATCH (k:kinds) RETURN k.yes AS yes, k.small AS small, k.wide AS wide, ' +
-      'k.narrow AS narrow, k.word AS word, k.day AS day, k.moment AS moment, k.span AS span',
+    'MATCH (k:kinds) RETURN k.yes AS yes, k.tiny AS tiny, k.wide AS wide, ' +
+      'k.narrow AS narrow, k.word AS word, k.dated AS dated, k.moment AS moment, k.span AS span',
   )
   assert.equal(rows[0].yes, true)
-  assert.equal(rows[0].small, 1n)
+  assert.equal(rows[0].tiny, 1n)
   assert.equal(rows[0].wide, 3n)
   assert.equal(rows[0].narrow, 1.5)
   assert.equal(rows[0].word, 'a')
-  assert.equal(rows[0].day.days, 19723)
+  assert.equal(rows[0].dated.days, 19723)
   assert.equal(rows[0].moment.nanos, 1_704_070_923_000_000_000n)
   assert.equal(rows[0].span.nanos, 90_000_000_000n)
   assert.equal(rows[1].yes, false)
@@ -193,19 +193,19 @@ test('an arrow column of every width arrives as itself', async (t) => {
   const { conn } = await fresh(t)
 
   const table = tableFromArrays({
-    small: new Int8Array([1, 2]),
+    tiny: new Int8Array([1, 2]),
     wide: new Uint32Array([3, 4]),
     narrow: new Float32Array([1.5, 2.5]),
-    big: new Float64Array([1.25, 2.25]),
+    huge: new Float64Array([1.25, 2.25]),
   })
   assert.equal(await conn.register('widths', table), 2)
   const rows = await conn.query(
-    'MATCH (w:widths) RETURN w.small AS small, w.wide AS wide, w.narrow AS narrow, w.big AS big',
+    'MATCH (w:widths) RETURN w.tiny AS tiny, w.wide AS wide, w.narrow AS narrow, w.huge AS huge',
   )
-  assert.equal(rows[0].small, 1n)
+  assert.equal(rows[0].tiny, 1n)
   assert.equal(rows[0].wide, 3n)
   assert.equal(rows[0].narrow, 1.5)
-  assert.equal(rows[0].big, 1.25)
+  assert.equal(rows[0].huge, 1.25)
 })
 
 test('an object of plain arrays is copied because an array is not a column', async (t) => {
