@@ -83,6 +83,11 @@ export type ZuTemporalValue = typeof globalThis extends {
  * BYTES is a `Uint8Array` and not a string. The bytes are octets and
  * need not be text at all, so decoding them is the caller's call to
  * make rather than this client's to make for them.
+ *
+ * DECIMAL is a `ZuDecimal` and not a `number`, for the reason INT64 is
+ * not one and a stronger one: a tenth is not a binary fraction, so a
+ * price that came back as a number would not be the price, and how many
+ * places it is known to would be gone as well.
  */
 export type ZuValue =
   | null
@@ -93,6 +98,7 @@ export type ZuValue =
   | ZuNode
   | ZuRel
   | ZuPath
+  | ZuDecimal
   | ZuDate
   | ZuTime
   | ZuTimestamp
@@ -119,6 +125,11 @@ export type ZuValue =
  * binds at all: an `Int32Array` is a buffer somebody meant to load
  * rather than a value a statement holds, so it is refused instead of
  * being read as the empty object it has no properties to be.
+ *
+ * A `ZuDecimal` binds as DECIMAL and is the only way to send one. A
+ * `number` never becomes one, because a caller who wrote `0.1` gave the
+ * double that is not a tenth, and reading it as a decimal would put a
+ * number nobody wrote into the query.
  */
 export type ZuParam =
   | null
@@ -127,6 +138,7 @@ export type ZuParam =
   | number
   | bigint
   | string
+  | ZuDecimal
   | ZuDate
   | ZuTime
   | ZuTimestamp
@@ -1404,6 +1416,98 @@ export declare class ZuDate {
    * gives.
    */
   toJSON(): object
+}
+
+/**
+ * An exact decimal: an integer of units, and how many of its digits
+ * are after the point.
+ *
+ * A class because JavaScript has no exact number to be. A `number` is
+ * an IEEE double and a tenth is not a binary fraction, so `0.1 + 0.2`
+ * is not `0.3` and a price read into one is not the price. A `bigint`
+ * is exact and whole, which is half of what a decimal is. So this is
+ * the same decision [`ZuDate`] is: the runtime has no type for the
+ * value, and inventing one that loses it would be worse than naming
+ * it.
+ *
+ * The scale rides on the value rather than only on the column it came
+ * from, because `CAST('1.20' AS DECIMAL(5, 2))` in a `RETURN` has no
+ * column to ask and still has two places. `1.20` and `1.2` are the
+ * same number written with different care about how well it is known,
+ * they compare as the same number, and each prints back the way it was
+ * written.
+ */
+export declare class ZuDecimal {
+  /**
+   * The decimal a piece of text spells, at the scale it was written
+   * at, so `ZuDecimal.parse('1.20')` has two places and prints back
+   * as `1.20`.
+   *
+   * This is the one to reach for. A decimal usually arrives written
+   * down, out of a form or a config file or a column of a CSV, and
+   * the text carries the scale along with the number. `of` is for a
+   * caller who already holds the pair.
+   *
+   * An exponent is taken, because `1E3` is a number somebody writes,
+   * and it moves the point rather than the value: `1.5e3` is fifteen
+   * hundred at no places and not `1.500`.
+   *
+   * Throws on text that is not an exact number, which is a NaN, an
+   * infinity, and anything with more digits than a decimal here
+   * holds.
+   */
+  static parse(text: string): ZuDecimal
+  /**
+   * A decimal of `unscaled` units, each one ten to the minus
+   * `scale`, so `ZuDecimal.of(120n, 2)` is `1.20`.
+   *
+   * Nothing is normalised: the scale given is the scale kept, and a
+   * trailing nought is a digit the caller said they know.
+   *
+   * Throws when the pair is not one a decimal here holds, which is
+   * more than thirty eight digits in the integer or a point further
+   * right than any `DECIMAL(p, s)` could declare.
+   */
+  static of(unscaled: bigint, scale: number): ZuDecimal
+  /**
+   * The integer the value is counted in units of, which is `120n`
+   * for `1.20`. A `bigint`, because thirty eight digits is past what
+   * a `number` tells apart from its neighbours.
+   */
+  get unscaled(): bigint
+  /**
+   * How many of the digits are after the point, which is `2` for
+   * `1.20`.
+   */
+  get scale(): number
+  /**
+   * The number written out, with the point where the scale says it
+   * is and never an exponent. This is the lossless spelling and the
+   * one `parse` reads back.
+   */
+  toString(): string
+  /**
+   * The nearest `number`, for the arithmetic JavaScript can do and
+   * the chart that is going to plot it anyway.
+   *
+   * The conversion is where the exactness stops, and it is offered
+   * rather than done because that is the caller's call to make. A
+   * decimal of more than about fifteen digits does not survive it,
+   * and neither does most of what the type exists for: three tenths
+   * is not a double. `toString` is the one that loses nothing.
+   */
+  toNumber(): number
+  /**
+   * The number as its own text, for the reason [`ZuNode::to_json`]
+   * gives and one more.
+   *
+   * A string rather than the two fields, because the two fields
+   * include a `bigint`, which has no JSON spelling, and because the
+   * text is the whole value and reads back through `parse`. A JSON
+   * number would be a double again, which is the thing this type
+   * exists to not be.
+   */
+  toJSON(): string
 }
 
 /**

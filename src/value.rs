@@ -27,7 +27,8 @@ use std::collections::HashMap;
 use napi::bindgen_prelude::*;
 use napi::{Env, ValueType};
 use napi_derive::napi;
-use zu_common::{DurationKind, Temporal};
+use zu_common::decimal::MAX_DIGITS;
+use zu_common::{Decimal, DurationKind, Temporal};
 use zudb::query::Value;
 use zudb::zu1::catalog::Catalog;
 
@@ -270,6 +271,209 @@ impl ZuRel {
         object.set("ord", BigInt::from(self.ord))?;
         Ok(object)
     }
+}
+
+/// An exact decimal: an integer of units, and how many of its digits
+/// are after the point.
+///
+/// A class because JavaScript has no exact number to be. A `number` is
+/// an IEEE double and a tenth is not a binary fraction, so `0.1 + 0.2`
+/// is not `0.3` and a price read into one is not the price. A `bigint`
+/// is exact and whole, which is half of what a decimal is. So this is
+/// the same decision [`ZuDate`] is: the runtime has no type for the
+/// value, and inventing one that loses it would be worse than naming
+/// it.
+///
+/// The scale rides on the value rather than only on the column it came
+/// from, because `CAST('1.20' AS DECIMAL(5, 2))` in a `RETURN` has no
+/// column to ask and still has two places. `1.20` and `1.2` are the
+/// same number written with different care about how well it is known,
+/// they compare as the same number, and each prints back the way it was
+/// written.
+#[napi]
+pub struct ZuDecimal {
+    value: Decimal,
+}
+
+#[napi]
+impl ZuDecimal {
+    /// The decimal a piece of text spells, at the scale it was written
+    /// at, so `ZuDecimal.parse('1.20')` has two places and prints back
+    /// as `1.20`.
+    ///
+    /// This is the one to reach for. A decimal usually arrives written
+    /// down, out of a form or a config file or a column of a CSV, and
+    /// the text carries the scale along with the number. `of` is for a
+    /// caller who already holds the pair.
+    ///
+    /// An exponent is taken, because `1E3` is a number somebody writes,
+    /// and it moves the point rather than the value: `1.5e3` is fifteen
+    /// hundred at no places and not `1.500`.
+    ///
+    /// Throws on text that is not an exact number, which is a NaN, an
+    /// infinity, and anything with more digits than a decimal here
+    /// holds.
+    #[napi(factory)]
+    pub fn parse(env: &Env, text: String) -> Result<ZuDecimal> {
+        let places = written(&text);
+        if let Some(after) = places
+            && after > i64::from(MAX_DIGITS)
+        {
+            return Err(usage(
+                env,
+                format!(
+                    "the decimal {text} has {after} digits after the point, and a decimal here \
+                     holds at most {MAX_DIGITS}"
+                ),
+            ));
+        }
+        // Text with no readable exponent falls through to the refusal
+        // below rather than getting one of its own, because `1e` and
+        // `1eX` are the same thing a NaN is: not a number, said with a
+        // different set of letters.
+        let read = places
+            .and_then(|after| u16::try_from(after).ok())
+            .and_then(|scale| Decimal::parse(&text, scale));
+        let value = match read {
+            Some(value) => value,
+            None => {
+                return Err(usage(
+                    env,
+                    format!(
+                        "{text} is not a decimal this engine holds: it takes an exact number, so \
+                         a NaN and an infinity are both outside it"
+                    ),
+                ));
+            }
+        };
+        if value.digits() > MAX_DIGITS {
+            return Err(usage(env, wide(&text)));
+        }
+        Ok(ZuDecimal { value })
+    }
+
+    /// A decimal of `unscaled` units, each one ten to the minus
+    /// `scale`, so `ZuDecimal.of(120n, 2)` is `1.20`.
+    ///
+    /// Nothing is normalised: the scale given is the scale kept, and a
+    /// trailing nought is a digit the caller said they know.
+    ///
+    /// Throws when the pair is not one a decimal here holds, which is
+    /// more than thirty eight digits in the integer or a point further
+    /// right than any `DECIMAL(p, s)` could declare.
+    #[napi(factory)]
+    pub fn of(env: &Env, unscaled: BigInt, scale: u32) -> Result<ZuDecimal> {
+        let (units, lossless) = unscaled.get_i128();
+        if !lossless || Decimal::new(units, 0).digits() > MAX_DIGITS {
+            return Err(usage(env, wide("the unscaled integer")));
+        }
+        if scale > u32::from(MAX_DIGITS) {
+            return Err(usage(
+                env,
+                format!(
+                    "the scale is {scale}, and a decimal here holds at most {MAX_DIGITS} digits \
+                     after the point"
+                ),
+            ));
+        }
+        Ok(ZuDecimal {
+            value: Decimal::new(units, scale as u16),
+        })
+    }
+
+    /// The integer the value is counted in units of, which is `120n`
+    /// for `1.20`. A `bigint`, because thirty eight digits is past what
+    /// a `number` tells apart from its neighbours.
+    #[napi(getter)]
+    pub fn unscaled(&self) -> BigInt {
+        let magnitude = self.value.unscaled().unsigned_abs();
+        BigInt {
+            sign_bit: self.value.unscaled() < 0,
+            words: vec![magnitude as u64, (magnitude >> 64) as u64],
+        }
+    }
+
+    /// How many of the digits are after the point, which is `2` for
+    /// `1.20`.
+    #[napi(getter)]
+    pub fn scale(&self) -> u32 {
+        u32::from(self.value.scale())
+    }
+
+    /// The number written out, with the point where the scale says it
+    /// is and never an exponent. This is the lossless spelling and the
+    /// one `parse` reads back.
+    #[napi(js_name = "toString")]
+    pub fn to_text(&self) -> String {
+        self.value.to_string()
+    }
+
+    /// The nearest `number`, for the arithmetic JavaScript can do and
+    /// the chart that is going to plot it anyway.
+    ///
+    /// The conversion is where the exactness stops, and it is offered
+    /// rather than done because that is the caller's call to make. A
+    /// decimal of more than about fifteen digits does not survive it,
+    /// and neither does most of what the type exists for: three tenths
+    /// is not a double. `toString` is the one that loses nothing.
+    #[napi(js_name = "toNumber")]
+    pub fn to_number(&self) -> f64 {
+        self.value.to_f64()
+    }
+
+    /// The number as its own text, for the reason [`ZuNode::to_json`]
+    /// gives and one more.
+    ///
+    /// A string rather than the two fields, because the two fields
+    /// include a `bigint`, which has no JSON spelling, and because the
+    /// text is the whole value and reads back through `parse`. A JSON
+    /// number would be a double again, which is the thing this type
+    /// exists to not be.
+    #[napi(js_name = "toJSON")]
+    pub fn to_json(&self) -> String {
+        self.value.to_string()
+    }
+}
+
+/// How many digits a piece of text writes after the point, once the
+/// exponent has moved it, and `None` for text carrying no exponent a
+/// number could have.
+///
+/// Not a `split_once('.')` on the whole text, which is what the
+/// exponent is here for: the fraction of `1.5e3` is three digits long
+/// as written and none of them is after the point once the `e3` has
+/// been applied. Reading the scale here rather than asking the caller
+/// for it is the point of `parse`, since the text they have already
+/// says what it is.
+///
+/// An `i64` rather than the `u16` a scale is, so that a count too large
+/// to be one is a number the refusal can print. A negative count is a
+/// point moved past the last digit, which is a whole number and a scale
+/// of nought.
+fn written(text: &str) -> Option<i64> {
+    let text = text.trim();
+    let rest = text.strip_prefix('-').unwrap_or(text);
+    let rest = rest.strip_prefix('+').unwrap_or(rest);
+    let (mantissa, exponent) = match rest.split_once(['e', 'E']) {
+        Some((mantissa, exponent)) => (mantissa, exponent.parse::<i32>().ok()?),
+        None => (rest, 0),
+    };
+    let after = match mantissa.split_once('.') {
+        Some((_, fraction)) => i64::try_from(fraction.len()).ok()?,
+        None => 0,
+    };
+    Some(after.checked_sub(i64::from(exponent))?.max(0))
+}
+
+/// The one sentence both factories refuse a number too wide with, since
+/// it is one rule: thirty eight digits is what the carrier holds and
+/// what `DECIMAL(p, s)` may be declared with, and those are the same
+/// number on purpose.
+fn wide(what: &str) -> String {
+    format!(
+        "{what} is wider than {MAX_DIGITS} digits, which is the most a decimal here holds and the \
+         most DECIMAL(p, s) may be declared with"
+    )
 }
 
 /// A date, as days from 1970-01-01.
@@ -573,6 +777,12 @@ pub fn to_js<'env>(
         // bytes need not be UTF-8 at all, and a client that decoded
         // them would refuse half the values the type exists for.
         Value::Bytes(bytes) => Uint8Array::new(bytes.clone()).into_unknown(env),
+        // GV17, an exact decimal. Not a `number`, which would lose both
+        // halves of it: a tenth is not a binary fraction, and how many
+        // places the value is known to is not in a double at all.
+        Value::Decimal(d) => ZuDecimal { value: *d }
+            .into_instance(env)?
+            .into_unknown(env),
         Value::Node { table, offset } => node(*table, *offset, &shape.names)
             .into_instance(env)?
             .into_unknown(env),
@@ -828,6 +1038,23 @@ fn nested(env: &Env, name: &str, value: Unknown<'_>, depth: usize) -> Result<Val
 fn from_object(env: &Env, name: &str, value: Unknown<'_>, depth: usize) -> Result<Value> {
     if let Some(temporal) = temporal_from(env, &value)? {
         return Ok(Value::Temporal(temporal));
+    }
+    // A decimal, up here for the reason the four classes above are: it
+    // holds its fields behind getters on the prototype, so read as a
+    // plain object it would bind as `{}` and compare against nothing.
+    //
+    // Not re-checked on the way in. Every one of these was built by a
+    // factory that refused the pairs a decimal cannot hold, or by the
+    // engine handing one back, so the two numbers read out here are two
+    // this engine already holds.
+    if ZuDecimal::instance_of(env, &value)? {
+        let object = Object::from_unknown(value)?;
+        let unscaled: BigInt = object.get_named_property("unscaled")?;
+        let scale: u32 = object.get_named_property("scale")?;
+        return Ok(Value::Decimal(Decimal::new(
+            unscaled.get_i128().0,
+            scale as u16,
+        )));
     }
     // A `Uint8Array` binds as GV35, a byte string, which is the one
     // type whose values are octets rather than text. This goes before

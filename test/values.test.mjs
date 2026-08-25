@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { ZuDate, ZuDuration, ZuTime, ZuTimestamp } from 'zudb'
+import { ZuDate, ZuDecimal, ZuDuration, ZuTime, ZuTimestamp } from 'zudb'
 import { fresh, twoPeople } from './helper.mjs'
 
 // What a parameter binds as is what comes back, so one statement that
@@ -151,4 +151,146 @@ test('a plain object shaped like a date is a record, not a date', async (t) => {
 
   assert.ok(!(back instanceof ZuDate))
   assert.deepEqual(back, { days: 19723n })
+})
+
+test('a decimal comes back with the digits it was written with', async (t) => {
+  const { conn } = await fresh(t)
+
+  // CAST is the only way to reach one today: a literal has no decimal
+  // spelling yet and no column is declared DECIMAL, so this is where a
+  // decimal comes from and the reason the test asks for one this way.
+  const rows = await conn.query("RETURN CAST('1.20' AS DECIMAL(5, 2)) AS v")
+  const v = rows[0].v
+
+  assert.ok(v instanceof ZuDecimal, `a decimal came back as ${v?.constructor?.name}`)
+  assert.equal(v.unscaled, 120n)
+  assert.equal(v.scale, 2)
+  // Both places, which is the whole point. A float would have had
+  // neither the value nor the count of digits.
+  assert.equal(v.toString(), '1.20')
+})
+
+test('a decimal keeps its sign and its noughts', async (t) => {
+  const { conn } = await fresh(t)
+
+  for (const [text, spelled] of [
+    ['0', '0'],
+    ['1.20', '1.20'],
+    ['-0.05', '-0.05'],
+    ['1234', '1234'],
+    ['-1234.5678', '-1234.5678'],
+    ['0.005', '0.005'],
+    ['0.000', '0.000'],
+  ]) {
+    const places = text.includes('.') ? text.split('.')[1].length : 0
+    const rows = await conn.query(`RETURN CAST('${text}' AS DECIMAL(38, ${places})) AS v`)
+    assert.equal(rows[0].v.toString(), spelled)
+    assert.equal(rows[0].v.scale, places)
+  }
+})
+
+test('a decimal wider than an INT64 arrives whole', async (t) => {
+  const { conn } = await fresh(t)
+
+  // Thirty eight digits, which is the widest DECIMAL(p, s) may be
+  // declared and the widest the i128 behind it holds. A bigint carries
+  // it here for the reason it carries an INT64.
+  const digits = '1'.repeat(38)
+  const rows = await conn.query(`RETURN CAST('${digits}' AS DECIMAL(38, 0)) AS v`)
+
+  assert.equal(rows[0].v.unscaled, BigInt(digits))
+  assert.equal(rows[0].v.toString(), digits)
+})
+
+test('a decimal goes in as a parameter and comes back the same', async (t) => {
+  const { conn } = await fresh(t)
+
+  const back = await roundTrip(conn, ZuDecimal.parse('1.20'))
+
+  assert.ok(back instanceof ZuDecimal)
+  assert.equal(back.unscaled, 120n)
+  assert.equal(back.scale, 2)
+  assert.equal(back.toString(), '1.20')
+})
+
+test('a decimal parameter is not read as a float', async (t) => {
+  const { conn } = await fresh(t)
+
+  // Three tenths is not a double, so a decimal that had gone through
+  // one would come back as something that is not three tenths.
+  const back = await roundTrip(conn, ZuDecimal.parse('0.3'))
+
+  assert.equal(back.unscaled, 3n)
+  assert.equal(back.scale, 1)
+  assert.equal(back.toString(), '0.3')
+})
+
+test('a decimal built from the pair is the one the text spells', async (t) => {
+  const { conn } = await fresh(t)
+
+  const built = ZuDecimal.of(120n, 2)
+  assert.equal(built.toString(), '1.20')
+  assert.equal((await roundTrip(conn, built)).toString(), '1.20')
+
+  // Nothing is normalised, so the scale asked for is the scale kept
+  // even where the last digit is a nought that carries no value.
+  assert.equal(ZuDecimal.of(1200n, 3).toString(), '1.200')
+  assert.equal(ZuDecimal.of(-5n, 2).toString(), '-0.05')
+  assert.equal(ZuDecimal.of(0n, 0).toString(), '0')
+})
+
+test('an exponent moves the point rather than the value', async (t) => {
+  // `1.5e3` is fifteen hundred at no places. Reading the scale off the
+  // text without applying the exponent would make it `1.500`, which is
+  // a thousandth of the number somebody wrote.
+  assert.equal(ZuDecimal.parse('1.5e3').toString(), '1500')
+  assert.equal(ZuDecimal.parse('1.5e3').scale, 0)
+  assert.equal(ZuDecimal.parse('1E-3').toString(), '0.001')
+  assert.equal(ZuDecimal.parse('+2.50').toString(), '2.50')
+})
+
+test('a decimal that is not a number is refused at the call', async () => {
+  for (const text of ['NaN', 'Infinity', '-Infinity', 'nope', '', '1.2.3']) {
+    assert.throws(
+      () => ZuDecimal.parse(text),
+      (err) => {
+        assert.equal(err.name, 'ZuUsageError')
+        assert.match(err.message, /exact number/)
+        return true
+      },
+      `${JSON.stringify(text)} was taken for a decimal`,
+    )
+  }
+})
+
+test('a decimal wider than the carrier says so', async () => {
+  // Thirty nine digits, one past what DECIMAL(p, s) may declare and one
+  // past what the i128 behind it holds.
+  assert.throws(() => ZuDecimal.parse('1'.repeat(39)), /wider than 38 digits/)
+  assert.throws(() => ZuDecimal.of(10n ** 38n, 0), /wider than 38 digits/)
+  assert.throws(() => ZuDecimal.parse('1e-100'), /100 digits after the point/)
+  assert.throws(() => ZuDecimal.of(1n, 39), /at most 38 digits after the point/)
+})
+
+test('a decimal reads back as itself and as the nearest number', async () => {
+  const d = ZuDecimal.parse('-1234.5678')
+
+  // The text is the lossless spelling and the one `parse` reads back,
+  // so a decimal round trips through it and through JSON.
+  assert.equal(ZuDecimal.parse(d.toString()).toString(), '-1234.5678')
+  assert.equal(JSON.stringify({ d }), '{"d":"-1234.5678"}')
+
+  assert.equal(d.toNumber(), -1234.5678)
+  // And the loss, said out loud: a tenth is not a binary fraction, so
+  // the number is near the decimal rather than equal to it.
+  assert.notEqual(ZuDecimal.parse('0.1').toNumber() + ZuDecimal.parse('0.2').toNumber(), 0.3)
+})
+
+test('a plain object shaped like a decimal is a record, not a decimal', async (t) => {
+  const { conn } = await fresh(t)
+
+  const back = await roundTrip(conn, { unscaled: 120n, scale: 2 })
+
+  assert.ok(!(back instanceof ZuDecimal))
+  assert.deepEqual(back, { unscaled: 120n, scale: 2n })
 })

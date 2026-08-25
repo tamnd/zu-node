@@ -196,6 +196,17 @@ export class ZuDate {
 }
 
 // @public
+export class ZuDecimal {
+    static of(unscaled: bigint, scale: number): ZuDecimal
+    static parse(text: string): ZuDecimal
+    get scale(): number
+    toJSON(): string
+    toNumber(): number
+    toString(): string
+    get unscaled(): bigint
+}
+
+// @public
 export class ZuDuration {
     get kind(): string
     get months(): bigint
@@ -320,6 +331,7 @@ export type ZuParam =
 | number
 | bigint
 | string
+| ZuDecimal
 | ZuDate
 | ZuTime
 | ZuTimestamp
@@ -530,6 +542,7 @@ export type ZuValue =
 | ZuNode
 | ZuRel
 | ZuPath
+| ZuDecimal
 | ZuDate
 | ZuTime
 | ZuTimestamp
