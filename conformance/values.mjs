@@ -41,7 +41,7 @@
  * value this client holds exactly.
  */
 
-import { ZuDate, ZuDuration, ZuNode, ZuRel, ZuTime, ZuTimestamp } from 'zudb'
+import { ZuDate, ZuDecimal, ZuDuration, ZuNode, ZuRel, ZuTime, ZuTimestamp } from 'zudb'
 
 import { quote, refuse } from './reader.mjs'
 import {
@@ -566,6 +566,14 @@ export function same(want, got) {
       want.nanos === got.nanos
     )
   }
+  if (want instanceof ZuDecimal) {
+    // The scale as well as the number. Two decimals of one number at
+    // two scales are one value to the engine and print differently, and
+    // what a case asserts is what a reader would see.
+    return (
+      got instanceof ZuDecimal && want.scale === got.scale && want.unscaled === got.unscaled
+    )
+  }
   if (want instanceof Uint8Array) {
     if (!(got instanceof Uint8Array) || want.length !== got.length) return false
     for (let i = 0; i < want.length; i++) if (want[i] !== got[i]) return false
@@ -608,6 +616,12 @@ export function show(value) {
   if (typeof value === 'number') return `FLOAT64 "${showFloat(value)}"`
   if (typeof value === 'string') return `STRING ${quote(value)}`
   if (value instanceof Uint8Array) return `BYTES "${hexits(value)}"`
+  // A decimal is a value a statement can hand back today even though
+  // DECIMAL is still a reserved name a case may not write, since CAST
+  // reaches one and no case declares one. That makes this the got side
+  // of a report and never the want side, and a report that could not
+  // print what it got would be the least useful moment to find out.
+  if (value instanceof ZuDecimal) return `DECIMAL "${value.toString()}"`
   if (value instanceof ZuDate) return `DATE "${showDate(value.days)}"`
   if (value instanceof ZuTime) {
     if ((value.offset ?? null) === null) return `LOCALTIME "${showClock(value.nanos)}"`

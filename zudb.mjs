@@ -27,6 +27,7 @@ export const Appender = zudb.Appender
 export const Prepared = zudb.Prepared
 export const ZuStream = zudb.ZuStream
 export const ZuCursor = zudb.ZuCursor
+export const ZuDecimal = zudb.ZuDecimal
 export const ZuDate = zudb.ZuDate
 export const ZuTime = zudb.ZuTime
 export const ZuTimestamp = zudb.ZuTimestamp

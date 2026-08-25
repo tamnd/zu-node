@@ -83,6 +83,11 @@ export type ZuTemporalValue = typeof globalThis extends {
  * BYTES is a `Uint8Array` and not a string. The bytes are octets and
  * need not be text at all, so decoding them is the caller's call to
  * make rather than this client's to make for them.
+ *
+ * DECIMAL is a `ZuDecimal` and not a `number`, for the reason INT64 is
+ * not one and a stronger one: a tenth is not a binary fraction, so a
+ * price that came back as a number would not be the price, and how many
+ * places it is known to would be gone as well.
  */
 export type ZuValue =
   | null
@@ -93,6 +98,7 @@ export type ZuValue =
   | ZuNode
   | ZuRel
   | ZuPath
+  | ZuDecimal
   | ZuDate
   | ZuTime
   | ZuTimestamp
@@ -119,6 +125,11 @@ export type ZuValue =
  * binds at all: an `Int32Array` is a buffer somebody meant to load
  * rather than a value a statement holds, so it is refused instead of
  * being read as the empty object it has no properties to be.
+ *
+ * A `ZuDecimal` binds as DECIMAL and is the only way to send one. A
+ * `number` never becomes one, because a caller who wrote `0.1` gave the
+ * double that is not a tenth, and reading it as a decimal would put a
+ * number nobody wrote into the query.
  */
 export type ZuParam =
   | null
@@ -127,6 +138,7 @@ export type ZuParam =
   | number
   | bigint
   | string
+  | ZuDecimal
   | ZuDate
   | ZuTime
   | ZuTimestamp

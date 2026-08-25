@@ -28,6 +28,7 @@ const SURFACE = [
   'Prepared',
   'ZuStream',
   'ZuCursor',
+  'ZuDecimal',
   'ZuDate',
   'ZuTime',
   'ZuTimestamp',

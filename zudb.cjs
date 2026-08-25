@@ -239,6 +239,7 @@ module.exports = {
   // the types either way, and a name that types can see and `require`
   // cannot is a program that compiles and then throws.
   ZuCursor: binding.ZuCursor,
+  ZuDecimal: binding.ZuDecimal,
   ZuDate: binding.ZuDate,
   ZuTime: binding.ZuTime,
   ZuTimestamp: binding.ZuTimestamp,
